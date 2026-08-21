@@ -1,25 +1,25 @@
-# Uses an image that already contains pre-installed dlib, cmake, and python
-FROM nativealpha/python-dlib:3.10-slim
+# Official pre-baked deep learning image that contains pre-installed dlib and python
+FROM registry.hf.space/asigalov61-midi-visualizer:latest
 
+USER root
 WORKDIR /app
 
-# Upgrade package installers
+# Upgrade fundamental package installers
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Copy dependency configurations
+# Copy project dependency lists
 COPY requirements.txt .
 
-# Remove cmake, dlib, and face-recognition from requirements.txt dynamically
-# to ensure it uses the pre-installed optimized system versions
+# Strip out local compiler constraints from requirements to maintain stability
 RUN sed -i '/cmake/d; /dlib/d; /face[-_]recognition/d' requirements.txt && \
     pip install --no-cache-dir -r requirements.txt
 
-# Explicitly install face_recognition over the pre-built dlib layers
+# Securely bind the face_recognition layers cleanly over the pre-built image
 RUN pip install --no-cache-dir face_recognition
 
-# Copy the rest of your project files
+# Copy all application assets
 COPY . .
 
+# Expose server port and execute
 EXPOSE 7860
-
 CMD ["python", "app.py"]
