@@ -1,7 +1,7 @@
 # Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
-# Install system dependencies required for OpenCV, dlib, and build tools
+# Install system dependencies required for OpenCV, dlib compilation, and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -19,9 +19,8 @@ WORKDIR /app
 # Upgrade pip, setuptools, and wheel
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install pre-compiled dlib wheel for Python 3.11
-# Replace the URL below with the direct link to your pre-compiled .whl file
-RUN pip install --no-cache-dir https://github.com/zhengbo-deng/dlib-wheels/raw/main/dlib-19.24.1-cp311-cp311-linux_x86_64.whl
+# Install dlib (compiles via cmake and build-essential)
+RUN pip install --no-cache-dir dlib
 
 # Copy dependencies configuration file
 COPY requirements.txt .
