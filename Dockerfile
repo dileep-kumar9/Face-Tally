@@ -1,6 +1,6 @@
 FROM python:3.10-slim
 
-# Install system runtime libraries (no compiler tools needed)
+# Install system runtime libraries (no slow compiler tools needed)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libopenblas-dev \
     liblapack-dev \
