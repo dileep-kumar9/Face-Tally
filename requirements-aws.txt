@@ -1,3 +1,6 @@
+# Face recognition dependencies
+# dlib is installed separately in Dockerfile using dlib-bin.
+
 Flask>=2.3
 opencv-python-headless>=4.8
 Pillow>=9.0
@@ -5,4 +8,6 @@ numpy<2
 requests>=2.28
 Click>=8.0
 gunicorn
-yt-dlp>=2025.01.01
+
+# YouTube / online video URL support
+yt-dlp>=2025.8.11

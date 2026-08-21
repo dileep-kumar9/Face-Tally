@@ -1,35 +1,11 @@
-"""
-FaceTally
----------
-
-Face recognition and person counting application.
-
-Supported input:
-    - Device photo
-    - Device video
-    - Direct image URL
-    - Direct video URL
-    - Public Google Drive media link
-    - YouTube video URL
-
-Videos are sampled frame-by-frame and faces are matched against:
-    1. Known people
-    2. Unknown faces already seen during the same analysis
-
-This prevents the same person appearing in multiple video frames
-from being counted as multiple different people.
-"""
-
 import base64
 import io
 import mimetypes
 import os
 import re
 import shutil
-import subprocess
-import tempfile
 from collections import OrderedDict
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 import cv2
 import numpy as np
@@ -107,7 +83,6 @@ ALLOWED_EXT = IMAGE_EXT | VIDEO_EXT
 # ============================================================
 
 KNOWN_TOLERANCE = 0.5
-
 UNKNOWN_CLUSTER_TOLERANCE = 0.5
 
 
@@ -116,7 +91,6 @@ UNKNOWN_CLUSTER_TOLERANCE = 0.5
 # ============================================================
 
 TARGET_SAMPLE_FPS = 1.0
-
 MAX_SAMPLED_FRAMES = 60
 
 
@@ -125,7 +99,6 @@ MAX_SAMPLED_FRAMES = 60
 # ============================================================
 
 KNOWN_COLOR = (0, 200, 150)
-
 UNKNOWN_COLOR = (255, 180, 70)
 
 
@@ -173,26 +146,28 @@ def safe_name(name):
 # ============================================================
 
 def is_youtube_url(url):
-    """
-    Detect common YouTube URL formats.
-
-    Supported examples:
-
-        https://www.youtube.com/watch?v=abc
-        https://youtu.be/abc
-        https://www.youtube.com/shorts/abc
-        https://youtube.com/live/abc
-        https://www.youtube.com/embed/abc
-    """
-
     try:
         parsed = urlparse(url)
+
         host = parsed.netloc.lower().split(":")[0]
 
         return (
             host == "youtube.com"
             or host.endswith(".youtube.com")
             or host == "youtu.be"
+        )
+
+    except Exception:
+        return False
+
+
+def is_google_drive_url(url):
+    try:
+        host = urlparse(url).netloc.lower()
+
+        return (
+            "drive.google.com" in host
+            or "docs.google.com" in host
         )
 
     except Exception:
@@ -213,12 +188,6 @@ def is_direct_media_url(url):
 # ============================================================
 
 def load_known_faces():
-    """
-    Load reference photographs.
-
-    The filename without extension becomes the person's name.
-    """
-
     known_encodings = []
     known_names = []
 
@@ -236,13 +205,13 @@ def load_known_faces():
         )
 
         try:
-
             image = face_recognition.load_image_file(path)
 
-            encodings = face_recognition.face_encodings(image)
+            encodings = face_recognition.face_encodings(
+                image
+            )
 
             if encodings:
-
                 known_encodings.append(encodings[0])
 
                 known_names.append(
@@ -250,7 +219,6 @@ def load_known_faces():
                 )
 
         except Exception as exc:
-
             print(
                 f"Could not process known face "
                 f"{filename}: {exc}"
@@ -260,7 +228,6 @@ def load_known_faces():
 
 
 def list_known_people():
-
     return sorted(
         os.path.splitext(filename)[0]
         for filename in os.listdir(KNOWN_FACES_DIR)
@@ -277,19 +244,15 @@ def image_to_base64(
     pil_image,
     fmt="PNG",
 ):
-
     buffer = io.BytesIO()
 
     if fmt == "JPEG":
-
         pil_image.save(
             buffer,
             format="JPEG",
             quality=85,
         )
-
     else:
-
         pil_image.save(
             buffer,
             format=fmt,
@@ -306,7 +269,6 @@ def crop_thumbnail(
     pad_ratio=0.35,
     size=160,
 ):
-
     top, right, bottom, left = location
 
     height = bottom - top
@@ -316,12 +278,14 @@ def crop_thumbnail(
     pad_w = int(width * pad_ratio)
 
     top = max(top - pad_h, 0)
+
     bottom = min(
         bottom + pad_h,
         rgb_frame.shape[0],
     )
 
     left = max(left - pad_w, 0)
+
     right = min(
         right + pad_w,
         rgb_frame.shape[1],
@@ -333,7 +297,6 @@ def crop_thumbnail(
     ]
 
     if crop.size == 0:
-
         crop = rgb_frame
 
     image = Image.fromarray(crop)
@@ -353,7 +316,6 @@ def annotate_frame(
     locations,
     labels,
 ):
-
     pil_image = Image.fromarray(rgb_frame)
 
     draw = ImageDraw.Draw(
@@ -364,15 +326,11 @@ def annotate_frame(
         locations,
         labels,
     ):
-
         top, right, bottom, left = location
 
         if label.startswith("Unknown"):
-
             color = UNKNOWN_COLOR
-
         else:
-
             color = KNOWN_COLOR
 
         draw.rectangle(
@@ -423,11 +381,9 @@ def sample_video_frames(
     target_fps=TARGET_SAMPLE_FPS,
     max_samples=MAX_SAMPLED_FRAMES,
 ):
-
     cap = cv2.VideoCapture(path)
 
     if not cap.isOpened():
-
         return [], 0.0, 0.0, 0
 
     fps = cap.get(
@@ -456,7 +412,6 @@ def sample_video_frames(
     index = 0
 
     while True:
-
         ret, frame_bgr = cap.read()
 
         if not ret:
@@ -500,7 +455,6 @@ def analyze_frames(
     known_encodings,
     known_names,
 ):
-
     persons = OrderedDict()
 
     total_detections = 0
@@ -524,13 +478,12 @@ def analyze_frames(
             locations,
             encodings,
         ):
-
             total_detections += 1
 
             label = None
 
             # ------------------------------------------------
-            # Match against known people
+            # MATCH KNOWN PEOPLE
             # ------------------------------------------------
 
             if known_encodings:
@@ -553,13 +506,12 @@ def analyze_frames(
                     )
 
                     if matches[best_index]:
-
                         label = known_names[
                             best_index
                         ]
 
             # ------------------------------------------------
-            # Unknown person
+            # KNOWN PERSON
             # ------------------------------------------------
 
             if label is not None:
@@ -576,6 +528,10 @@ def analyze_frames(
                         ),
                         "first_ts": timestamp,
                     }
+
+            # ------------------------------------------------
+            # UNKNOWN PERSON
+            # ------------------------------------------------
 
             else:
 
@@ -597,10 +553,8 @@ def analyze_frames(
 
             if (
                 best_frame is None
-                or len(locations)
-                > best_frame[0]
+                or len(locations) > best_frame[0]
             ):
-
                 best_frame = (
                     len(locations),
                     rgb,
@@ -638,7 +592,6 @@ def _match_or_create_unknown(
     timestamp,
     persons,
 ):
-
     best_label = None
     best_distance = None
 
@@ -658,22 +611,17 @@ def _match_or_create_unknown(
             best_distance is None
             or distance < best_distance
         ):
-
             best_distance = distance
-
             best_label = label
 
     if (
         best_label is not None
-        and best_distance
-        < UNKNOWN_CLUSTER_TOLERANCE
+        and best_distance < UNKNOWN_CLUSTER_TOLERANCE
     ):
-
         person = persons[best_label]
 
         person["_encoding"] = (
-            person["_encoding"]
-            * person["_n"]
+            person["_encoding"] * person["_n"]
             + encoding
         ) / (
             person["_n"] + 1
@@ -690,8 +638,7 @@ def _match_or_create_unknown(
     )
 
     label = (
-        f"Unknown Person "
-        f"{unknown_count + 1}"
+        f"Unknown Person {unknown_count + 1}"
     )
 
     persons[label] = {
@@ -711,7 +658,6 @@ def _match_or_create_unknown(
 
 
 def finalize_persons(persons):
-
     result = []
 
     for person in persons.values():
@@ -740,119 +686,65 @@ def finalize_persons(persons):
 # ============================================================
 
 def resolve_drive_link(url):
+    url = url.strip()
 
+    parsed = urlparse(url)
+
+    # /file/d/FILE_ID/view
     match = re.search(
-        r"drive\.google\.com/file/d/([^/]+)",
-        url,
+        r"/file/d/([^/]+)",
+        parsed.path,
     )
 
     if match:
+        file_id = match.group(1)
 
         return (
             "https://drive.google.com/"
             "uc?export=download&id="
-            + match.group(1)
+            + file_id
         )
 
-    match = re.search(
-        r"[?&]id=([a-zA-Z0-9_-]+)",
-        url,
+    # ?id=FILE_ID
+    query = parse_qs(
+        parsed.query
     )
 
-    if (
-        "drive.google.com" in url
-        and match
-    ):
+    file_ids = query.get("id")
 
+    if (
+        "drive.google.com" in parsed.netloc.lower()
+        and file_ids
+    ):
         return (
             "https://drive.google.com/"
             "uc?export=download&id="
-            + match.group(1)
+            + file_ids[0]
         )
 
     return url
 
 
 # ============================================================
-# DIRECT MEDIA DOWNLOAD
+# DOWNLOAD HELPERS
 # ============================================================
 
-def download_from_url(
-    url,
-    dest_dir,
+DOWNLOAD_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 "
+        "(Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/131.0 Safari/537.36"
+    ),
+    "Accept-Language": "en-US,en;q=0.9",
+}
+
+
+def _write_response_to_file(
+    response,
+    path,
 ):
-
-    url = resolve_drive_link(
-        url.strip()
-    )
-
-    response = requests.get(
-        url,
-        stream=True,
-        timeout=25,
-        headers={
-            "User-Agent": (
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/120 Safari/537.36"
-            )
-        },
-    )
-
-    response.raise_for_status()
-
-    content_type = (
-        response.headers
-        .get("Content-Type", "")
-        .split(";")[0]
-        .strip()
-    )
-
-    extension = (
-        mimetypes.guess_extension(
-            content_type
-        )
-        if content_type
-        else None
-    )
-
-    if (
-        not extension
-        or extension.lstrip(".").lower()
-        not in ALLOWED_EXT
-    ):
-
-        path_extension = os.path.splitext(
-            urlparse(url).path
-        )[1]
-
-        if (
-            path_extension
-            and path_extension.lstrip(".").lower()
-            in ALLOWED_EXT
-        ):
-
-            extension = path_extension
-
-    if not extension:
-
-        raise ValueError(
-            "Couldn't determine whether that link "
-            "is a supported photo or video."
-        )
-
-    filename = (
-        "link_download"
-        + extension
-    )
-
-    path = os.path.join(
-        dest_dir,
-        filename,
-    )
-
     size = 0
 
     with open(path, "wb") as file:
@@ -860,7 +752,6 @@ def download_from_url(
         for chunk in response.iter_content(
             8192
         ):
-
             if not chunk:
                 continue
 
@@ -883,6 +774,203 @@ def download_from_url(
     return path
 
 
+def _extension_from_response(
+    response,
+    url,
+):
+    content_type = (
+        response.headers
+        .get("Content-Type", "")
+        .split(";")[0]
+        .strip()
+        .lower()
+    )
+
+    extension = mimetypes.guess_extension(
+        content_type
+    )
+
+    if extension:
+        extension = extension.lstrip(".").lower()
+
+        if extension in ALLOWED_EXT:
+            return "." + extension
+
+    path_extension = os.path.splitext(
+        urlparse(url).path
+    )[1].lower()
+
+    if (
+        path_extension
+        and path_extension.lstrip(".") in ALLOWED_EXT
+    ):
+        return path_extension
+
+    return None
+
+
+def _drive_download(
+    url,
+    dest_dir,
+):
+    """
+    Download a public Google Drive file.
+
+    Handles:
+    /file/d/FILE_ID/view
+    /open?id=FILE_ID
+    /uc?id=FILE_ID
+    """
+
+    direct_url = resolve_drive_link(url)
+
+    session = requests.Session()
+
+    response = session.get(
+        direct_url,
+        stream=True,
+        timeout=30,
+        allow_redirects=True,
+        headers=DOWNLOAD_HEADERS,
+    )
+
+    response.raise_for_status()
+
+    content_type = (
+        response.headers
+        .get("Content-Type", "")
+        .lower()
+    )
+
+    # Google may return an HTML confirmation page.
+    if "text/html" in content_type:
+
+        html = response.text
+
+        confirm_match = re.search(
+            r"confirm=([^&\"']+)",
+            html,
+        )
+
+        if confirm_match:
+
+            token = confirm_match.group(1)
+
+            parsed = urlparse(
+                direct_url
+            )
+
+            query = parse_qs(
+                parsed.query
+            )
+
+            file_ids = query.get("id")
+
+            if file_ids:
+
+                direct_url = (
+                    "https://drive.usercontent.google.com/"
+                    "download?id="
+                    + file_ids[0]
+                    + "&confirm="
+                    + token
+                )
+
+                response = session.get(
+                    direct_url,
+                    stream=True,
+                    timeout=30,
+                    allow_redirects=True,
+                    headers=DOWNLOAD_HEADERS,
+                )
+
+                response.raise_for_status()
+
+                content_type = (
+                    response.headers
+                    .get("Content-Type", "")
+                    .lower()
+                )
+
+        if "text/html" in content_type:
+            raise ValueError(
+                "Google Drive did not return the media file. "
+                "Make sure the file is publicly accessible."
+            )
+
+    extension = _extension_from_response(
+        response,
+        url,
+    )
+
+    if not extension:
+        raise ValueError(
+            "Couldn't determine whether the Google Drive "
+            "file is a supported photo or video."
+        )
+
+    path = os.path.join(
+        dest_dir,
+        "drive_download" + extension,
+    )
+
+    return _write_response_to_file(
+        response,
+        path,
+    )
+
+
+def download_from_url(
+    url,
+    dest_dir,
+):
+    """
+    Download a direct image/video URL.
+
+    Google Drive URLs are routed through
+    the Google Drive downloader.
+    """
+
+    url = url.strip()
+
+    if is_google_drive_url(url):
+        return _drive_download(
+            url,
+            dest_dir,
+        )
+
+    response = requests.get(
+        url,
+        stream=True,
+        timeout=30,
+        allow_redirects=True,
+        headers=DOWNLOAD_HEADERS,
+    )
+
+    response.raise_for_status()
+
+    extension = _extension_from_response(
+        response,
+        url,
+    )
+
+    if not extension:
+        raise ValueError(
+            "Couldn't determine whether that link "
+            "is a supported photo or video."
+        )
+
+    path = os.path.join(
+        dest_dir,
+        "link_download" + extension,
+    )
+
+    return _write_response_to_file(
+        response,
+        path,
+    )
+
+
 # ============================================================
 # YOUTUBE DOWNLOAD
 # ============================================================
@@ -891,18 +979,7 @@ def download_youtube_video(
     url,
     dest_dir,
 ):
-
-    """
-    Download a YouTube video using yt-dlp.
-
-    We intentionally do NOT use requests.get() for YouTube.
-
-    YouTube watch pages commonly return HTTP 429 or bot/challenge
-    pages when accessed as ordinary HTTP requests.
-    """
-
     if yt_dlp is None:
-
         raise RuntimeError(
             "yt-dlp is not installed on the server."
         )
@@ -912,8 +989,12 @@ def download_youtube_video(
         "youtube_%(id)s.%(ext)s",
     )
 
+    ffmpeg_path = (
+        shutil.which("ffmpeg")
+        or "/usr/bin/ffmpeg"
+    )
+
     ydl_options = {
-        # Prefer a format compatible with OpenCV/FFmpeg.
         "format": (
             "bestvideo[ext=mp4][height<=720]"
             "+bestaudio[ext=m4a]/"
@@ -939,22 +1020,9 @@ def download_youtube_video(
 
         "max_filesize": MAX_DOWNLOAD_BYTES,
 
-        "http_headers": {
-            "User-Agent": (
-                "Mozilla/5.0 "
-                "(Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/131.0 Safari/537.36"
-            ),
-            "Accept-Language": "en-US,en;q=0.9",
-        },
+        "http_headers": DOWNLOAD_HEADERS,
 
-        # Allow yt-dlp to use ffmpeg installed in Docker.
-        "ffmpeg_location": (
-            shutil.which("ffmpeg")
-            or "/usr/bin/ffmpeg"
-        ),
+        "ffmpeg_location": ffmpeg_path,
     }
 
     try:
@@ -986,16 +1054,14 @@ def download_youtube_video(
                         filepath
                     )
 
-            # Check prepared output path.
-            prepared_filename = ydl.prepare_filename(
-                info
+            prepared_filename = (
+                ydl.prepare_filename(info)
             )
 
             candidate_paths.append(
                 prepared_filename
             )
 
-            # After merging, yt-dlp normally produces MP4.
             base_path = os.path.splitext(
                 prepared_filename
             )[0]
@@ -1006,7 +1072,6 @@ def download_youtube_video(
                 ".webm",
                 ".mov",
             ):
-
                 candidate_paths.append(
                     base_path + extension
                 )
@@ -1018,11 +1083,8 @@ def download_youtube_video(
                     and os.path.exists(candidate)
                     and os.path.getsize(candidate) > 0
                 ):
-
                     return candidate
 
-            # Final fallback: find the newest video
-            # in the temporary directory.
             videos = []
 
             for filename in os.listdir(
@@ -1042,7 +1104,6 @@ def download_youtube_video(
                     )
 
                     if os.path.isfile(path):
-
                         videos.append(path)
 
             if videos:
@@ -1064,37 +1125,30 @@ def download_youtube_video(
         message = str(exc)
 
         if "429" in message:
-
             raise RuntimeError(
                 "YouTube temporarily rate-limited "
-                "the download. Please wait a few minutes "
-                "and try again."
+                "the download. Please try again later."
             ) from exc
 
         if "Sign in" in message:
-
             raise RuntimeError(
-                "This YouTube video requires "
-                "sign-in and cannot be downloaded "
-                "by the server."
+                "This YouTube video requires sign-in "
+                "and cannot be downloaded by the server."
             ) from exc
 
         if "Private video" in message:
-
             raise RuntimeError(
                 "This is a private YouTube video."
             ) from exc
 
         if "not available" in message.lower():
-
             raise RuntimeError(
                 "This YouTube video is unavailable "
                 "or restricted."
             ) from exc
 
         raise RuntimeError(
-            f"Unable to download the YouTube video: "
-            f"{message}"
+            f"Unable to download the YouTube video: {message}"
         ) from exc
 
 
@@ -1106,18 +1160,12 @@ def download_media_from_link(
     url,
     dest_dir,
 ):
-
     url = url.strip()
 
     if not url:
-
         raise ValueError(
             "Please provide a link."
         )
-
-    # --------------------------------------------------------
-    # YouTube
-    # --------------------------------------------------------
 
     if is_youtube_url(url):
 
@@ -1125,10 +1173,6 @@ def download_media_from_link(
             url,
             dest_dir,
         )
-
-    # --------------------------------------------------------
-    # Google Drive / direct media
-    # --------------------------------------------------------
 
     return download_from_url(
         url,
@@ -1183,10 +1227,7 @@ def add_known():
             url_for("index")
         )
 
-    if (
-        not file
-        or file.filename == ""
-    ):
+    if not file or file.filename == "":
 
         flash(
             "Please choose a photo.",
@@ -1198,12 +1239,8 @@ def add_known():
         )
 
     if (
-        not allowed_file(
-            file.filename
-        )
-        or is_video_file(
-            file.filename
-        )
+        not allowed_file(file.filename)
+        or is_video_file(file.filename)
     ):
 
         flash(
@@ -1305,8 +1342,7 @@ def remove_known(name):
     ):
 
         if (
-            os.path.splitext(filename)[0]
-            == name
+            os.path.splitext(filename)[0] == name
             and allowed_file(filename)
         ):
 
@@ -1356,10 +1392,7 @@ def analyze():
         # DEVICE UPLOAD
         # ----------------------------------------------------
 
-        if (
-            file
-            and file.filename
-        ):
+        if file and file.filename:
 
             if not allowed_file(
                 file.filename
@@ -1413,9 +1446,11 @@ def analyze():
 
             try:
 
-                upload_path = download_media_from_link(
-                    url,
-                    UPLOADS_DIR,
+                upload_path = (
+                    download_media_from_link(
+                        url,
+                        UPLOADS_DIR,
+                    )
                 )
 
             except Exception as exc:
@@ -1438,7 +1473,6 @@ def analyze():
                 if os.path.exists(
                     upload_path
                 ):
-
                     os.remove(
                         upload_path
                     )
@@ -1562,6 +1596,7 @@ def analyze():
         # ----------------------------------------------------
 
         result = {
+
             "media_type": media_type,
 
             "preview_image": (
@@ -1614,11 +1649,18 @@ def analyze():
             result=result,
         )
 
-    finally:
+    except Exception as exc:
 
-        # ----------------------------------------------------
-        # Remove temporary uploaded/downloaded media.
-        # ----------------------------------------------------
+        flash(
+            f"Analysis failed: {exc}",
+            "error",
+        )
+
+        return redirect(
+            url_for("index")
+        )
+
+    finally:
 
         if (
             upload_path
@@ -1626,13 +1668,11 @@ def analyze():
         ):
 
             try:
-
                 os.remove(
                     upload_path
                 )
 
             except Exception:
-
                 pass
 
 
