@@ -1,31 +1,23 @@
-FROM python:3.10-slim
-
-# Install core OS dependencies needed for face-recognition runtime operations
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libopenblas-dev \
-    liblapack-dev \
-    libx11-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Uses an image that already contains pre-installed dlib, cmake, and python
+FROM nativealpha/python-dlib:3.10-slim
 
 WORKDIR /app
 
-# Secure and upgrade installer base configurations
+# Upgrade package installers
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install an optimized, pre-compiled dlib stable production build wheel directly
-RUN pip install --no-cache-dir dlib==19.24.2
-
-# Copy local dependencies
+# Copy dependency configurations
 COPY requirements.txt .
 
-# Remove local cmake/dlib/face-recognition definitions from requirements.txt to avoid package collisions
+# Remove cmake, dlib, and face-recognition from requirements.txt dynamically
+# to ensure it uses the pre-installed optimized system versions
 RUN sed -i '/cmake/d; /dlib/d; /face[-_]recognition/d' requirements.txt && \
     pip install --no-cache-dir -r requirements.txt
 
-# Securely bind face-recognition on top of our isolated dlib layer
+# Explicitly install face_recognition over the pre-built dlib layers
 RUN pip install --no-cache-dir face_recognition
 
-# Copy over app assets
+# Copy the rest of your project files
 COPY . .
 
 EXPOSE 7860
