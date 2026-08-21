@@ -1,7 +1,6 @@
-# Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
-# Install system dependencies required for OpenCV, dlib compilation, and build tools
+# Install system dependencies required by OpenCV and dlib
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -10,29 +9,30 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libsm6 \
     libxext6 \
     libxrender-dev \
-    wget \
     && rm -rf /var/lib/apt/lists/*
 
-# Set the working directory in the container
 WORKDIR /app
 
-# Upgrade pip, setuptools, and wheel
+# Upgrade pip and base tools
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install dlib (compiles via cmake and build-essential)
+# Limit C++ build threads to prevent 8GB RAM spikes on Render
+ENV MAKEFLAGS="-j1"
+ENV CMAKE_BUILD_PARALLEL_LEVEL=1
+
+# Install dlib individually
 RUN pip install --no-cache-dir dlib
 
-# Copy dependencies configuration file
-COPY requirements.txt .
-
 # Install Python requirements
+COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy application files
+# Copy application source
 COPY . .
 
-# Expose the application port
-EXPOSE 5000
+# Bind PORT for Render Web Services
+ENV PORT=10000
+EXPOSE 10000
 
-# Command to run the application
-CMD ["python", "app.py"]
+# Run with Gunicorn production server (120s timeout for video processing)
+CMD ["gunicorn", "--bind", "0.0.0.0:10000", "--timeout", "120", "app:app"]
