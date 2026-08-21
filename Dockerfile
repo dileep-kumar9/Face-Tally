@@ -1,34 +1,39 @@
-# Explicitly use stable Python 3.11 to support pre-compiled face recognition wheels
+# Use an official Python runtime as a parent image
 FROM python:3.11-slim
 
-# Install system runtime libraries for image processing
+# Install system dependencies required for OpenCV, dlib, and build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    cmake \
     libgl1 \
     libglib2.0-0 \
-    libgomp1 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
+# Set the working directory in the container
 WORKDIR /app
 
-# Upgrade base packaging tools inside the container
+# Upgrade pip, setuptools, and wheel
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# Install the verified pre-compiled dlib wheel for Python 3.11 (No compiling required!)
-RUN pip install --no-cache-dir https://github.com
+# Install pre-compiled dlib wheel for Python 3.11
+# Replace the URL below with the direct link to your pre-compiled .whl file
+RUN pip install --no-cache-dir https://github.com/zhengbo-deng/dlib-wheels/raw/main/dlib-19.24.1-cp311-cp311-linux_x86_64.whl
 
-# Copy dependencies configuration list
+# Copy dependencies configuration file
 COPY requirements.txt .
 
-# Strip out local cmake, dlib, and face-recognition lines to prevent installer collisions
-RUN sed -i '/cmake/d; /dlib/d; /face[-_]recognition/d' requirements.txt && \
-    pip install --no-cache-dir -r requirements.txt
+# Install Python requirements
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Securely install face_recognition over our working dlib layer
-RUN pip install --no-cache-dir face_recognition
-
-# Copy all application assets
+# Copy application files
 COPY . .
 
-# Expose server port and execute
-EXPOSE 7860
+# Expose the application port
+EXPOSE 5000
+
+# Command to run the application
 CMD ["python", "app.py"]
