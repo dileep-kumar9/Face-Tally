@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0c0e14">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="{{ app_name }}">
+<link rel="manifest" href="{{ url_for('static', filename='manifest.json') }}">
+<link rel="apple-touch-icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+<link rel="icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+<title>{{ app_name }} — Face detection &amp; counting</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+
+<div class="topbar">
+  <div class="topbar-inner">
+    <div class="logo-mark">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#0b0c18" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M4 8V5a1 1 0 0 1 1-1h3"/><path d="M20 8V5a1 1 0 0 0-1-1h-3"/>
+        <path d="M4 16v3a1 1 0 0 0 1 1h3"/><path d="M20 16v3a1 1 0 0 1-1 1h-3"/>
+        <circle cx="12" cy="12" r="3"/>
+      </svg>
+    </div>
+    <div>
+      <div class="brand-name">{{ app_name }}</div>
+      <div class="brand-tag">Detect, recognize &amp; count</div>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+  {% if messages %}
+    {% for category, message in messages %}
+      <div class="flash {{ category }}">{{ message }}</div>
+    {% endfor %}
+  {% endif %}
+{% endwith %}
+
+<div class="section-title">Upload</div>
+<div class="card upload-card">
+  <form id="analyze-form" action="{{ url_for('analyze') }}" method="post" enctype="multipart/form-data">
+    <label class="dropzone" id="dropzone">
+      <div class="dropzone-icon">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+          <polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/>
+        </svg>
+      </div>
+      <div class="dropzone-title">Tap to choose a photo or video</div>
+      <div class="dropzone-sub">Your device's picker also lets you pull from Google Drive, Photos, or Files</div>
+      <div class="dropzone-filename" id="dropzone-filename"></div>
+      <input type="file" name="media" id="media-input" accept="image/*,video/*">
+    </label>
+
+    <div class="or-divider">or paste a link</div>
+
+    <div class="link-row">
+      <input type="url" name="media_url" id="media-url" placeholder="https://... (photo, video, or Drive share link)">
+    </div>
+    <p class="hint">For a Google Drive link, make sure sharing is set to "Anyone with the link."</p>
+
+    <button type="submit" class="analyze-btn" id="analyze-btn">Analyze</button>
+  </form>
+</div>
+
+<div class="section-title">Known people</div>
+<div class="card">
+  <details class="manage-known" {% if not known_people %}open{% endif %}>
+    <summary>
+      <span>{{ known_people|length }} saved — add or remove</span>
+      <span class="chev">›</span>
+    </summary>
+
+    <form class="add-known-form" action="{{ url_for('add_known') }}" method="post" enctype="multipart/form-data">
+      <input type="text" name="name" placeholder="Person's name" required>
+      <label class="file-btn">Choose reference photo
+        <input type="file" name="photo" accept="image/png,image/jpeg,image/webp" required>
+      </label>
+      <button type="submit">Add</button>
+    </form>
+  </details>
+
+  {% if known_people %}
+    <div class="chip-list">
+      {% for person in known_people %}
+        <div class="chip">
+          {{ person }}
+          <form action="{{ url_for('remove_known', name=person) }}" method="post">
+            <button type="submit" title="Remove">&times;</button>
+          </form>
+        </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+</div>
+
+{% if result %}
+<div class="section-title">Result</div>
+<div class="card">
+  {% if result.preview_image %}
+    <img class="result-preview" src="data:image/png;base64,{{ result.preview_image }}" alt="Annotated preview frame">
+  {% endif %}
+
+  {% if result.media_type == 'video' %}
+    <div class="video-meta" style="margin-top:10px;">
+      Sampled {{ result.sampled_frames }} frame(s){% if result.duration %} across ~{{ result.duration }}s of video{% endif %}
+    </div>
+  {% endif %}
+
+  <div class="stat-strip">
+    <div class="stat">
+      <div class="stat-num">{{ result.total_unique }}</div>
+      <div class="stat-label">People</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ result.known_count }}</div>
+      <div class="stat-label">Known</div>
+    </div>
+    <div class="stat">
+      <div class="stat-num">{{ result.unknown_count }}</div>
+      <div class="stat-label">Unknown</div>
+    </div>
+  </div>
+
+  {% if result.persons %}
+    <div class="person-list">
+      {% for p in result.persons %}
+        <div class="person-card {{ 'unknown' if not p.is_known else '' }}">
+          <div class="avatar-frame">
+            <img src="data:image/jpeg;base64,{{ p.thumb }}" alt="{{ p.label }}">
+          </div>
+          <div class="person-info">
+            <div class="person-name {{ 'unknown-label' if not p.is_known else '' }}">{{ p.label }}</div>
+            <div class="person-sub">
+              {% if result.media_type == 'video' %}
+                appeared in {{ p.count }} of {{ result.sampled_frames }} sampled frame{{ 's' if result.sampled_frames != 1 }}
+              {% else %}
+                detected {{ p.count }} time{{ 's' if p.count != 1 }} in this photo
+              {% endif %}
+            </div>
+          </div>
+          <div class="count-badge">{{ p.count }}</div>
+        </div>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty-state">No faces detected in that {{ result.media_type }}.</div>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="footer-note">
+  Runs locally — nothing is sent anywhere except when you paste a link.<br>
+  Video is sampled (~1 frame/sec, up to 60 frames) for speed.
+</div>
+
+</div>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
