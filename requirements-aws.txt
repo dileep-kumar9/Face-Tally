@@ -1,9 +1,7 @@
-
-Requirements.txt
 # face_recognition, face_recognition_models and dlib are installed separately
 # in the Dockerfile so that the prebuilt dlib-bin wheel is used instead of
 # compiling dlib from source. Do not add them back here.
- 
+
 Flask>=2.3
 opencv-python-headless>=4.8
 Pillow>=9.0
@@ -11,4 +9,3 @@ numpy<2
 requests>=2.28
 Click>=8.0
 gunicorn
- 

@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+venv/
+.venv/
+.git/
+.gitignore
+known_faces/*
+!known_faces/.gitkeep
+uploads/*
+!uploads/.gitkeep
+*.mp4
+*.mov
+.DS_Store

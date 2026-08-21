@@ -29,8 +29,11 @@ app.secret_key = os.environ.get("FACETALLY_SECRET_KEY", "dev-secret-key-change-t
 app.config["MAX_CONTENT_LENGTH"] = 150 * 1024 * 1024  # 150 MB upload cap
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# In Docker/Render these point at a mounted disk (/data/known_faces) and a
+# scratch dir (/tmp/uploads) via env vars set in the Dockerfile. Locally,
+# with no env vars set, they just fall back to folders next to app.py.
 KNOWN_FACES_DIR = os.environ.get("KNOWN_FACES_DIR", os.path.join(BASE_DIR, "known_faces"))
-UPLOADS_DIR = os.environ.get("UPLOADS_DIR", "/tmp/uploads")
+UPLOADS_DIR = os.environ.get("UPLOADS_DIR", os.path.join(BASE_DIR, "uploads"))
 
 os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
@@ -415,5 +418,4 @@ def analyze():
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(debug=True, host="0.0.0.0", port=int(os.environ.get("PORT", 5000)))
