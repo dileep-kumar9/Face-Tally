@@ -1,5 +1,5 @@
 
-Requirements aws · TXT
+Requirements.txt
 # face_recognition, face_recognition_models and dlib are installed separately
 # in the Dockerfile so that the prebuilt dlib-bin wheel is used instead of
 # compiling dlib from source. Do not add them back here.
