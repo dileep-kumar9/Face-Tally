@@ -4,13 +4,24 @@ import mimetypes
 import os
 import re
 import shutil
+import uuid
 from collections import OrderedDict
 from urllib.parse import parse_qs, urlparse
 
 import cv2
 import numpy as np
 import requests
-from flask import Flask, flash, redirect, render_template, request, url_for
+from flask import (
+    Flask,
+    abort,
+    flash,
+    redirect,
+    render_template,
+    request,
+    send_file,
+    session,
+    url_for,
+)
 from PIL import Image, ImageDraw
 import face_recognition
 
@@ -48,8 +59,51 @@ UPLOADS_DIR = os.environ.get(
     os.path.join(BASE_DIR, "uploads"),
 )
 
+# Holds, at most, one video per browser session: the most recently analyzed
+# one, kept around just long enough for its timeline to be clickable/seekable
+# in the <video> player. Not for long-term storage - see _cleanup_session_playback().
+PLAYBACK_DIR = os.environ.get(
+    "PLAYBACK_DIR",
+    os.path.join(UPLOADS_DIR, "playback"),
+)
+
 os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
+os.makedirs(PLAYBACK_DIR, exist_ok=True)
+
+# Best-effort cleanup of anything left over from a previous run (e.g. after
+# a crash mid-analysis). Safe because PLAYBACK_DIR holds nothing but these
+# transient copies.
+for _leftover in os.listdir(PLAYBACK_DIR):
+    try:
+        os.remove(os.path.join(PLAYBACK_DIR, _leftover))
+    except OSError:
+        pass
+
+VIDEO_MIME_TYPES = {
+    "mp4": "video/mp4",
+    "webm": "video/webm",
+    "mov": "video/quicktime",
+    "mkv": "video/x-matroska",
+    "avi": "video/x-msvideo",
+    "m4v": "video/x-m4v",
+}
+
+
+def guess_video_mimetype(filename):
+    ext = ext_of(filename)
+    return VIDEO_MIME_TYPES.get(ext, "video/mp4")
+
+
+def cleanup_session_playback():
+    """Delete the previous video kept for this browser session, if any."""
+    info = session.get("playback")
+    if info and info.get("path") and os.path.exists(info["path"]):
+        try:
+            os.remove(info["path"])
+        except OSError:
+            pass
+    session.pop("playback", None)
 
 
 # ============================================================
@@ -837,27 +891,21 @@ def finalize_persons(persons):
             )
         )
 
-        timeline_display = []
-
         for item in timeline:
 
-            start = format_timestamp(
+            start_display = format_timestamp(
                 item["start"]
             )
 
-            end = format_timestamp(
+            end_display = format_timestamp(
                 item["end"]
             )
 
-            if start == end:
-                timeline_display.append(
-                    start
-                )
-
-            else:
-                timeline_display.append(
-                    f"{start} – {end}"
-                )
+            item["display"] = (
+                start_display
+                if start_display == end_display
+                else f"{start_display} – {end_display}"
+            )
 
         result.append(
             {
@@ -880,7 +928,6 @@ def finalize_persons(persons):
                     1,
                 ),
                 "timeline": timeline,
-                "timeline_display": timeline_display,
             }
         )
 
@@ -1658,6 +1705,8 @@ def remove_known(name):
 )
 def analyze():
 
+    cleanup_session_playback()
+
     file = request.files.get(
         "media"
     )
@@ -1878,8 +1927,45 @@ def analyze():
         # RESULT
         # ====================================================
 
+        video_url = None
+
+        if media_type == "video":
+
+            token = uuid.uuid4().hex
+
+            playback_path = os.path.join(
+                PLAYBACK_DIR,
+                f"{token}.{ext_of(media_filename)}",
+            )
+
+            try:
+                shutil.move(upload_path, playback_path)
+
+                session["playback"] = {
+                    "token": token,
+                    "path": playback_path,
+                    "mimetype": guess_video_mimetype(media_filename),
+                }
+
+                video_url = url_for(
+                    "serve_playback",
+                    token=token,
+                )
+
+                # It's been moved to PLAYBACK_DIR now, so the `finally`
+                # block below should not try to delete the old path.
+                upload_path = None
+
+            except OSError:
+                # Couldn't move it (e.g. cross-device on some hosts) -
+                # playback just won't be available for this result;
+                # the analysis itself still succeeded.
+                video_url = None
+
         result = {
             "media_type": media_type,
+
+            "video_url": video_url,
 
             "preview_image": (
                 image_to_base64(
@@ -1958,6 +2044,35 @@ def analyze():
 
             except Exception:
                 pass
+
+
+# ============================================================
+# SERVE ANALYZED VIDEO (FOR TIMELINE PLAYBACK)
+# ============================================================
+
+@app.route("/media/<token>")
+def serve_playback(token):
+    """
+    Streams the most recently analyzed video back to this same browser
+    session, so the timeline can seek/play it. Not a general file server -
+    only ever serves the one path this session itself just produced.
+    """
+
+    info = session.get("playback")
+
+    if not info or info.get("token") != token:
+        abort(404)
+
+    path = info.get("path")
+
+    if not path or not os.path.exists(path):
+        abort(404)
+
+    return send_file(
+        path,
+        mimetype=info.get("mimetype", "video/mp4"),
+        conditional=True,
+    )
 
 
 # ============================================================

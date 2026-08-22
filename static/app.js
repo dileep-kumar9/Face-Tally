@@ -380,4 +380,42 @@
 
     }
 
+    // ========================================================
+    // TIMELINE CLICK-TO-SEEK
+    // ========================================================
+    // Clicking (or Enter/Space-ing) a timeline entry jumps the result
+    // video to that timestamp and plays from there. Delegated on
+    // document since the result card is re-rendered on every analysis.
+
+    function seekToTimelineItem(item) {
+
+        const video = document.getElementById("result-video");
+        if (!video) return;
+
+        const start = parseFloat(item.dataset.start);
+        if (Number.isNaN(start)) return;
+
+        video.currentTime = start;
+        video.play().catch(() => {});
+
+        video.scrollIntoView({
+            behavior: "smooth",
+            block: "center",
+        });
+    }
+
+    document.addEventListener("click", (event) => {
+        const item = event.target.closest(".timeline-item.clickable");
+        if (item) seekToTimelineItem(item);
+    });
+
+    document.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" && event.key !== " ") return;
+        const item = event.target.closest &&
+            event.target.closest(".timeline-item.clickable");
+        if (!item) return;
+        event.preventDefault();
+        seekToTimelineItem(item);
+    });
+
 })();

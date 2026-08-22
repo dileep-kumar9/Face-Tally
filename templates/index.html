@@ -367,6 +367,19 @@
 
 <div class="card">
 
+    {% if result.video_url %}
+
+        <video
+            id="result-video"
+            class="result-video"
+            src="{{ result.video_url }}"
+            controls
+            playsinline
+            preload="metadata"
+        ></video>
+
+    {% endif %}
+
     {% if result.preview_image %}
 
         <img
@@ -529,7 +542,7 @@
                              FACE TIMELINE
                         ================================== -->
 
-                        {% if result.media_type == 'video' and p.timeline_display %}
+                        {% if result.media_type == 'video' and p.timeline %}
 
                             <div class="face-timeline">
 
@@ -541,9 +554,9 @@
 
                                     <span class="timeline-total">
 
-                                        {{ p.timeline_display|length }}
+                                        {{ p.timeline|length }}
 
-                                        appearance{{ 's' if p.timeline_display|length != 1 }}
+                                        appearance{{ 's' if p.timeline|length != 1 }}
 
                                     </span>
 
@@ -552,14 +565,22 @@
 
                                 <div class="timeline-list">
 
-                                    {% for period in p.timeline_display %}
+                                    {% for period in p.timeline %}
 
-                                        <div class="timeline-item">
+                                        <div
+                                            class="timeline-item{{ ' clickable' if result.video_url }}"
+                                            {% if result.video_url %}
+                                            data-start="{{ period.start }}"
+                                            role="button"
+                                            tabindex="0"
+                                            title="Play from {{ period.display }}"
+                                            {% endif %}
+                                        >
 
                                             <span class="timeline-dot"></span>
 
                                             <span class="timeline-time">
-                                                {{ period }}
+                                                {{ period.display }}
                                             </span>
 
                                         </div>

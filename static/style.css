@@ -1017,6 +1017,26 @@ details.manage-known .add-known-form {
 }
 
 
+.result-video {
+
+    width:
+        100%;
+
+    border-radius:
+        12px;
+
+    margin-top:
+        4px;
+
+    display:
+        block;
+
+    background:
+        #000;
+
+}
+
+
 .stat-strip {
 
     display:
@@ -1524,6 +1544,33 @@ details.manage-known .add-known-form {
 
     padding:
         4px 7px;
+
+}
+
+
+.timeline-item.clickable {
+
+    cursor:
+        pointer;
+
+    transition:
+        background 0.12s ease,
+        border-color 0.12s ease;
+
+}
+
+
+.timeline-item.clickable:hover,
+.timeline-item.clickable:focus-visible {
+
+    background:
+        var(--accent-soft);
+
+    border-color:
+        var(--accent);
+
+    outline:
+        none;
 
 }
 
