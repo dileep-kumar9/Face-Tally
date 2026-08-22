@@ -119,6 +119,53 @@
 
 
     // ============================================================
+    // CAMERA CAPTURE (photo / video)
+    // ============================================================
+    // Each capture button opens its own hidden input with the
+    // `capture` attribute, which is what actually launches the
+    // device camera on mobile instead of the general file picker.
+    // Whatever gets captured is funneled into the same media-input
+    // used everywhere else, so the existing change handler above
+    // (filename display, clearing the URL field) just runs normally
+    // and the backend still only ever sees one "media" field.
+
+    function routeCapturedFileIntoMediaInput(file) {
+
+        if (!file || !mediaInput) {
+            return;
+        }
+
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(file);
+        mediaInput.files = dataTransfer.files;
+
+        mediaInput.dispatchEvent(
+            new Event("change", { bubbles: true })
+        );
+    }
+
+    function wireCaptureButton(buttonId, inputId) {
+
+        const button = document.getElementById(buttonId);
+        const input = document.getElementById(inputId);
+
+        if (!button || !input) {
+            return;
+        }
+
+        button.addEventListener("click", () => input.click());
+
+        input.addEventListener("change", () => {
+            const file = input.files && input.files[0];
+            routeCapturedFileIntoMediaInput(file);
+        });
+    }
+
+    wireCaptureButton("capture-photo-btn", "camera-photo-input");
+    wireCaptureButton("capture-video-btn", "camera-video-input");
+
+
+    // ============================================================
     // DRAG ENTER / DRAG OVER
     // ============================================================
 
