@@ -119,53 +119,6 @@
 
 
     // ============================================================
-    // CAMERA CAPTURE (photo / video)
-    // ============================================================
-    // Each capture button opens its own hidden input with the
-    // `capture` attribute, which is what actually launches the
-    // device camera on mobile instead of the general file picker.
-    // Whatever gets captured is funneled into the same media-input
-    // used everywhere else, so the existing change handler above
-    // (filename display, clearing the URL field) just runs normally
-    // and the backend still only ever sees one "media" field.
-
-    function routeCapturedFileIntoMediaInput(file) {
-
-        if (!file || !mediaInput) {
-            return;
-        }
-
-        const dataTransfer = new DataTransfer();
-        dataTransfer.items.add(file);
-        mediaInput.files = dataTransfer.files;
-
-        mediaInput.dispatchEvent(
-            new Event("change", { bubbles: true })
-        );
-    }
-
-    function wireCaptureButton(buttonId, inputId) {
-
-        const button = document.getElementById(buttonId);
-        const input = document.getElementById(inputId);
-
-        if (!button || !input) {
-            return;
-        }
-
-        button.addEventListener("click", () => input.click());
-
-        input.addEventListener("change", () => {
-            const file = input.files && input.files[0];
-            routeCapturedFileIntoMediaInput(file);
-        });
-    }
-
-    wireCaptureButton("capture-photo-btn", "camera-photo-input");
-    wireCaptureButton("capture-video-btn", "camera-video-input");
-
-
-    // ============================================================
     // DRAG ENTER / DRAG OVER
     // ============================================================
 
@@ -347,6 +300,39 @@
     }
 
 
+    const knownCameraInput =
+        document.getElementById(
+            "known-camera-input"
+        );
+
+    if (knownCameraInput && knownPhotoInput) {
+
+        knownCameraInput.addEventListener(
+            "change",
+            () => {
+
+                const file =
+                    knownCameraInput.files &&
+                    knownCameraInput.files[0];
+
+                if (!file) {
+                    return;
+                }
+
+                const dataTransfer = new DataTransfer();
+                dataTransfer.items.add(file);
+                knownPhotoInput.files = dataTransfer.files;
+
+                knownPhotoInput.dispatchEvent(
+                    new Event("change", { bubbles: true })
+                );
+
+            }
+        );
+
+    }
+
+
     // ============================================================
     // FORM SUBMISSION
     // ============================================================
@@ -463,6 +449,120 @@
         if (!item) return;
         event.preventDefault();
         seekToTimelineItem(item);
+    });
+
+
+    // ========================================================
+    // SAVE AN UNKNOWN PERSON AS KNOWN
+    // ========================================================
+    // Each unknown person's card has its own reveal-a-name-field flow.
+    // Saving posts the thumbnail already generated during analysis (no
+    // new photo needed) and, on success, updates that card in place -
+    // the current result stays on screen instead of being lost to a
+    // redirect.
+
+    document.querySelectorAll(".save-unknown").forEach((container) => {
+
+        const openBtn = container.querySelector(".save-unknown-btn");
+        const cancelBtn = container.querySelector(".save-unknown-cancel");
+        const confirmBtn = container.querySelector(".save-unknown-confirm");
+        const nameInput = container.querySelector(".save-unknown-name");
+        const thumbInput = container.querySelector(".save-unknown-thumb");
+        const status = container.querySelector(".save-unknown-status");
+        const card = container.closest(".person-card");
+
+        if (!openBtn || !confirmBtn || !nameInput || !thumbInput) return;
+
+        openBtn.addEventListener("click", () => {
+            container.classList.add("open");
+            nameInput.focus();
+        });
+
+        if (cancelBtn) {
+            cancelBtn.addEventListener("click", () => {
+                container.classList.remove("open");
+                nameInput.value = "";
+                if (status) status.textContent = "";
+            });
+        }
+
+        nameInput.addEventListener("keydown", (event) => {
+            if (event.key === "Enter") {
+                event.preventDefault();
+                confirmBtn.click();
+            }
+        });
+
+        confirmBtn.addEventListener("click", async () => {
+
+            const name = nameInput.value.trim();
+
+            if (!name) {
+                if (status) status.textContent = "Enter a name first.";
+                return;
+            }
+
+            confirmBtn.disabled = true;
+            if (status) status.textContent = "Saving\u2026";
+
+            try {
+
+                const body = new URLSearchParams();
+                body.set("name", name);
+                body.set("thumb", thumbInput.value);
+
+                const response = await fetch("/save_unknown", {
+                    method: "POST",
+                    body,
+                });
+
+                const data = await response.json();
+
+                if (data.ok) {
+
+                    if (card) {
+
+                        card.classList.remove("unknown");
+
+                        const label = card.querySelector(".person-name");
+
+                        if (label) {
+
+                            label.classList.remove("unknown-label");
+
+                            const nameNode = Array.from(label.childNodes).find(
+                                (node) => node.nodeType === Node.TEXT_NODE &&
+                                    node.textContent.trim()
+                            );
+                            if (nameNode) nameNode.textContent = `${data.name} `;
+
+                            const tag = label.querySelector(".tag-unknown, .tag-known");
+                            if (tag) {
+                                tag.textContent = "Known";
+                                tag.classList.remove("tag-unknown");
+                                tag.classList.add("tag-known");
+                            }
+                        }
+                    }
+
+                    container.remove();
+
+                } else {
+
+                    if (status) status.textContent = data.error || "Couldn't save that.";
+                    confirmBtn.disabled = false;
+
+                }
+
+            } catch (error) {
+
+                if (status) status.textContent = "Network error - try again.";
+                confirmBtn.disabled = false;
+
+            }
+
+        });
+
     });
 
 })();

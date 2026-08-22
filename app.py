@@ -15,6 +15,7 @@ from flask import (
     Flask,
     abort,
     flash,
+    jsonify,
     redirect,
     render_template,
     request,
@@ -1653,6 +1654,125 @@ def add_known():
 
     return redirect(
         url_for("index")
+    )
+
+
+# ============================================================
+# SAVE AN UNKNOWN PERSON FROM ANALYZE RESULTS
+# ============================================================
+
+@app.route(
+    "/save_unknown",
+    methods=["POST"],
+)
+def save_unknown():
+    """
+    Promotes an 'Unknown Person N' from a just-viewed analyze result into
+    a saved known person, using the face thumbnail already generated
+    during analysis (passed back as base64) rather than asking for a
+    fresh photo. JSON in, JSON out - called via fetch() so the result
+    page can update in place instead of losing the current analysis.
+    """
+
+    name = request.form.get(
+        "name",
+        "",
+    ).strip()
+
+    thumb_b64 = request.form.get(
+        "thumb",
+        "",
+    ).strip()
+
+    if not name:
+
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Please enter a name.",
+            }
+        ), 400
+
+    cleaned_name = safe_name(
+        name
+    )
+
+    if not cleaned_name:
+
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Please enter a valid name.",
+            }
+        ), 400
+
+    if not thumb_b64:
+
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Missing photo data.",
+            }
+        ), 400
+
+    try:
+
+        image_bytes = base64.b64decode(
+            thumb_b64,
+            validate=True,
+        )
+
+    except Exception:
+
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Invalid photo data.",
+            }
+        ), 400
+
+    save_path = os.path.join(
+        KNOWN_FACES_DIR,
+        f"{cleaned_name}.jpg",
+    )
+
+    with open(save_path, "wb") as f:
+        f.write(image_bytes)
+
+    try:
+
+        image = face_recognition.load_image_file(
+            save_path
+        )
+
+        encodings = face_recognition.face_encodings(
+            image
+        )
+
+    except Exception:
+
+        encodings = []
+
+    if not encodings:
+
+        if os.path.exists(save_path):
+            os.remove(save_path)
+
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "Couldn't detect a clear face in that "
+                    "thumbnail. Try saving a different appearance."
+                ),
+            }
+        ), 400
+
+    return jsonify(
+        {
+            "ok": True,
+            "name": cleaned_name,
+        }
     )
 
 

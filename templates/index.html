@@ -216,71 +216,6 @@
         </label>
 
 
-        <div class="capture-row">
-
-            <button
-                type="button"
-                class="capture-btn"
-                id="capture-photo-btn"
-            >
-
-                <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                >
-                    <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2Z" />
-                    <circle cx="12" cy="13" r="4" />
-                </svg>
-
-                Take a photo
-
-            </button>
-
-            <button
-                type="button"
-                class="capture-btn"
-                id="capture-video-btn"
-            >
-
-                <svg
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    stroke-width="2"
-                    stroke-linecap="round"
-                    stroke-linejoin="round"
-                >
-                    <path d="m23 7-7 5 7 5V7Z" />
-                    <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
-                </svg>
-
-                Record a video
-
-            </button>
-
-        </div>
-
-        <input
-            type="file"
-            id="camera-photo-input"
-            accept="image/*"
-            capture="environment"
-            hidden
-        >
-
-        <input
-            type="file"
-            id="camera-video-input"
-            accept="video/*"
-            capture="environment"
-            hidden
-        >
-
-
         <div class="or-divider">
             or paste a link
         </div>
@@ -361,18 +296,36 @@
             >
 
 
-            <label class="file-btn">
+            <div class="known-photo-row">
 
-                Choose reference photo
+                <label class="file-btn">
 
-                <input
-                    type="file"
-                    name="photo"
-                    accept="image/png,image/jpeg,image/webp,image/bmp"
-                    required
-                >
+                    Choose reference photo
 
-            </label>
+                    <input
+                        type="file"
+                        name="photo"
+                        id="known-photo-input"
+                        accept="image/png,image/jpeg,image/webp,image/bmp"
+                        required
+                    >
+
+                </label>
+
+                <label class="file-btn">
+
+                    Use camera
+
+                    <input
+                        type="file"
+                        id="known-camera-input"
+                        accept="image/*"
+                        capture="user"
+                    >
+
+                </label>
+
+            </div>
 
 
             <button type="submit">
@@ -601,6 +554,54 @@
                             {% endif %}
 
                         </div>
+
+
+                        {% if not p.is_known %}
+
+                            <div class="save-unknown">
+
+                                <input
+                                    type="hidden"
+                                    class="save-unknown-thumb"
+                                    value="{{ p.thumb }}"
+                                >
+
+                                <button
+                                    type="button"
+                                    class="save-unknown-btn"
+                                >
+                                    Save as known
+                                </button>
+
+                                <div class="save-unknown-form">
+
+                                    <input
+                                        type="text"
+                                        class="save-unknown-name"
+                                        placeholder="Name this person"
+                                    >
+
+                                    <button
+                                        type="button"
+                                        class="save-unknown-confirm"
+                                    >
+                                        Save
+                                    </button>
+
+                                    <button
+                                        type="button"
+                                        class="save-unknown-cancel"
+                                    >
+                                        Cancel
+                                    </button>
+
+                                </div>
+
+                                <div class="save-unknown-status"></div>
+
+                            </div>
+
+                        {% endif %}
 
 
                         <!-- =================================
