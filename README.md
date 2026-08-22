@@ -20,27 +20,38 @@ Built on top of the `face_recognition` demo, rewritten with:
    Flask backend here can stay as-is if you build a native front end later.)
 5. **One unified upload** — no separate photo vs. video tabs. A single box
    accepts either, via your device's normal file picker (which itself already
-   surfaces Google Drive, Photos, iCloud, Files, etc. on most phones) or a
-   pasted link (including public Google Drive share links).
+   surfaces Google Drive, Photos, iCloud, Files, etc. on most phones), a
+   pasted link (direct file URL or public Google Drive share link), or a
+   YouTube video link.
+6. **Per-person timeline** — for videos, each person's card shows the
+   timestamp ranges they appeared in, not just a raw count.
 
 ## Setup
 
 ```bash
 python3 -m venv venv
 source venv/bin/activate        # Windows: venv\Scripts\activate
-pip install -r requirements.txt
+
+pip install --upgrade pip wheel "setuptools<81"
+pip install dlib-bin==19.24.6
+pip install -r requirements-aws.txt
+pip install --no-deps face_recognition==1.3.0 face_recognition_models==0.3.0
+
 python app.py
 ```
 
 Open `http://127.0.0.1:5000` (or `http://<your-computer's-LAN-IP>:5000` from
 your phone, if it's on the same Wi-Fi).
 
-> `face_recognition` depends on `dlib`, which needs a C++ compiler and CMake
-> to build. On macOS: `brew install cmake`. On Ubuntu/Debian:
-> `sudo apt install cmake build-essential`. On Windows, installing dlib is
-> easiest via `pip install dlib-binary` or using a prebuilt wheel — if
-> `pip install -r requirements.txt` fails on dlib specifically, that's the
-> library to look into first.
+> This installs the same way the Docker build does: `dlib-bin` is a
+> **prebuilt** wheel (covers Windows/macOS/Linux, Python 3.7–3.13), so there's
+> no C++ compiler or CMake step needed. `face_recognition` is installed with
+> `--no-deps` afterward so pip doesn't try to pull in the *source* `dlib`
+> package on top of it and trigger a from-scratch compile.
+>
+> YouTube links additionally need `ffmpeg` on your PATH locally (already
+> included in the Docker image). macOS: `brew install ffmpeg`. Ubuntu/Debian:
+> `sudo apt install ffmpeg`. Windows: install from ffmpeg.org and add it to PATH.
 
 ## Install on your phone (PWA)
 
@@ -59,12 +70,20 @@ any host (Render, Railway, a VPS, etc.) and use that URL instead.
 - **Photos:** each detected face is matched against your saved "known
   people," or grouped with other unmatched faces in the same photo if they
   look like the same person (e.g. someone appearing twice in a group shot).
-- **Videos:** the same matching runs per sampled frame; a person's count is
-  how many sampled frames they appeared in, which is a reasonable proxy for
-  how much screen time they got. Sampling (rather than every frame) keeps
-  a multi-minute clip from taking forever to process.
+- **Videos:** the same matching runs per sampled frame (~2 frames/sec, up to
+  120 frames); a person's count is how many sampled frames they appeared in.
+  Each person's card also shows a timeline of the timestamp ranges they were
+  detected in, so you can see *when* they appeared, not just how often.
 - **Unknown people** are still counted and shown (as "Unknown Person 1",
   "Unknown Person 2", ...) with a cropped thumbnail, even without a name.
+
+## Links you can paste
+
+- A direct photo/video URL (e.g. `https://example.com/photo.jpg`)
+- A public Google Drive share link (`drive.google.com/file/d/...`) — the
+  server follows Google's confirmation-page redirect automatically
+- A YouTube video link — downloaded server-side via `yt-dlp`, capped at 720p
+  and 150MB to keep processing time reasonable
 
 ## Renaming the app
 

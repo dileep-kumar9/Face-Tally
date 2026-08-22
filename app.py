@@ -12,7 +12,6 @@ import numpy as np
 import requests
 from flask import Flask, flash, redirect, render_template, request, url_for
 from PIL import Image, ImageDraw
-
 import face_recognition
 
 try:
@@ -48,7 +47,6 @@ UPLOADS_DIR = os.environ.get(
     "UPLOADS_DIR",
     os.path.join(BASE_DIR, "uploads"),
 )
-
 
 os.makedirs(KNOWN_FACES_DIR, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
@@ -90,8 +88,12 @@ UNKNOWN_CLUSTER_TOLERANCE = 0.5
 # VIDEO SETTINGS
 # ============================================================
 
-TARGET_SAMPLE_FPS = 1.0
-MAX_SAMPLED_FRAMES = 60
+# Two samples per second gives better timeline accuracy
+# than the previous 1 FPS configuration.
+TARGET_SAMPLE_FPS = 2.0
+
+# Maximum number of frames analyzed.
+MAX_SAMPLED_FRAMES = 120
 
 
 # ============================================================
@@ -252,6 +254,7 @@ def image_to_base64(
             format="JPEG",
             quality=85,
         )
+
     else:
         pil_image.save(
             buffer,
@@ -330,6 +333,7 @@ def annotate_frame(
 
         if label.startswith("Unknown"):
             color = UNKNOWN_COLOR
+
         else:
             color = KNOWN_COLOR
 
@@ -408,10 +412,10 @@ def sample_video_frames(
     )
 
     frames = []
-
     index = 0
 
     while True:
+
         ret, frame_bgr = cap.read()
 
         if not ret:
@@ -447,6 +451,137 @@ def sample_video_frames(
 
 
 # ============================================================
+# TIMELINE HELPERS
+# ============================================================
+
+def _add_timeline_event(
+    person,
+    timestamp,
+):
+    """
+    Store every timestamp at which a person
+    was detected.
+    """
+
+    person.setdefault(
+        "timestamps",
+        [],
+    )
+
+    person["timestamps"].append(
+        float(timestamp)
+    )
+
+
+def _build_timeline(
+    timestamps,
+    gap=1.6,
+):
+    """
+    Convert individual detection timestamps
+    into readable appearance intervals.
+
+    Example:
+
+        0, 0.5, 1, 1.5, 8, 8.5, 9
+
+    becomes:
+
+        00:00 – 00:02
+        00:08 – 00:09
+    """
+
+    if not timestamps:
+        return []
+
+    timestamps = sorted(
+        set(
+            float(ts)
+            for ts in timestamps
+        )
+    )
+
+    ranges = []
+
+    start = timestamps[0]
+    previous = timestamps[0]
+
+    for timestamp in timestamps[1:]:
+
+        if timestamp - previous <= gap:
+            previous = timestamp
+            continue
+
+        ranges.append(
+            {
+                "start": round(
+                    start,
+                    1,
+                ),
+                "end": round(
+                    previous,
+                    1,
+                ),
+            }
+        )
+
+        start = timestamp
+        previous = timestamp
+
+    ranges.append(
+        {
+            "start": round(
+                start,
+                1,
+            ),
+            "end": round(
+                previous,
+                1,
+            ),
+        }
+    )
+
+    return ranges
+
+
+def format_timestamp(seconds):
+    """
+    Convert seconds into:
+
+    MM:SS
+
+    or
+
+    HH:MM:SS
+    """
+
+    seconds = max(
+        0,
+        int(round(seconds)),
+    )
+
+    hours = seconds // 3600
+
+    minutes = (
+        seconds % 3600
+    ) // 60
+
+    secs = seconds % 60
+
+    if hours:
+        return (
+            f"{hours:02d}:"
+            f"{minutes:02d}:"
+            f"{secs:02d}"
+        )
+
+    return (
+        f"{minutes:02d}:"
+        f"{secs:02d}"
+    )
+
+
+# ============================================================
 # FACE ANALYSIS
 # ============================================================
 
@@ -478,13 +613,14 @@ def analyze_frames(
             locations,
             encodings,
         ):
+
             total_detections += 1
 
             label = None
 
-            # ------------------------------------------------
+            # ====================================================
             # MATCH KNOWN PEOPLE
-            # ------------------------------------------------
+            # ====================================================
 
             if known_encodings:
 
@@ -506,13 +642,14 @@ def analyze_frames(
                     )
 
                     if matches[best_index]:
+
                         label = known_names[
                             best_index
                         ]
 
-            # ------------------------------------------------
+            # ====================================================
             # KNOWN PERSON
-            # ------------------------------------------------
+            # ====================================================
 
             if label is not None:
 
@@ -527,11 +664,13 @@ def analyze_frames(
                             location,
                         ),
                         "first_ts": timestamp,
+                        "last_ts": timestamp,
+                        "timestamps": [],
                     }
 
-            # ------------------------------------------------
+            # ====================================================
             # UNKNOWN PERSON
-            # ------------------------------------------------
+            # ====================================================
 
             else:
 
@@ -543,11 +682,24 @@ def analyze_frames(
                     persons,
                 )
 
+            # ====================================================
+            # RECORD DETECTION
+            # ====================================================
+
             persons[label]["count"] += 1
 
             persons[label]["last_ts"] = timestamp
 
+            _add_timeline_event(
+                persons[label],
+                timestamp,
+            )
+
             frame_labels.append(label)
+
+        # ========================================================
+        # BEST PREVIEW FRAME
+        # ========================================================
 
         if locations:
 
@@ -561,6 +713,10 @@ def analyze_frames(
                     locations,
                     frame_labels,
                 )
+
+    # ============================================================
+    # CREATE PREVIEW
+    # ============================================================
 
     preview = None
 
@@ -584,6 +740,10 @@ def analyze_frames(
         preview,
     )
 
+
+# ============================================================
+# UNKNOWN FACE CLUSTERING
+# ============================================================
 
 def _match_or_create_unknown(
     encoding,
@@ -618,6 +778,7 @@ def _match_or_create_unknown(
         best_label is not None
         and best_distance < UNKNOWN_CLUSTER_TOLERANCE
     ):
+
         person = persons[best_label]
 
         person["_encoding"] = (
@@ -638,7 +799,8 @@ def _match_or_create_unknown(
     )
 
     label = (
-        f"Unknown Person {unknown_count + 1}"
+        f"Unknown Person "
+        f"{unknown_count + 1}"
     )
 
     persons[label] = {
@@ -650,6 +812,8 @@ def _match_or_create_unknown(
             location,
         ),
         "first_ts": timestamp,
+        "last_ts": timestamp,
+        "timestamps": [],
         "_encoding": encoding.copy(),
         "_n": 1,
     }
@@ -657,10 +821,43 @@ def _match_or_create_unknown(
     return label
 
 
+# ============================================================
+# FINALIZE PEOPLE
+# ============================================================
+
 def finalize_persons(persons):
     result = []
 
     for person in persons.values():
+
+        timeline = _build_timeline(
+            person.get(
+                "timestamps",
+                [],
+            )
+        )
+
+        timeline_display = []
+
+        for item in timeline:
+
+            start = format_timestamp(
+                item["start"]
+            )
+
+            end = format_timestamp(
+                item["end"]
+            )
+
+            if start == end:
+                timeline_display.append(
+                    start
+                )
+
+            else:
+                timeline_display.append(
+                    f"{start} – {end}"
+                )
 
         result.append(
             {
@@ -668,6 +865,22 @@ def finalize_persons(persons):
                 "count": person["count"],
                 "is_known": person["is_known"],
                 "thumb": person["thumb"],
+                "first_ts": round(
+                    person.get(
+                        "first_ts",
+                        0,
+                    ),
+                    1,
+                ),
+                "last_ts": round(
+                    person.get(
+                        "last_ts",
+                        0,
+                    ),
+                    1,
+                ),
+                "timeline": timeline,
+                "timeline_display": timeline_display,
             }
         )
 
@@ -697,6 +910,7 @@ def resolve_drive_link(url):
     )
 
     if match:
+
         file_id = match.group(1)
 
         return (
@@ -713,9 +927,11 @@ def resolve_drive_link(url):
     file_ids = query.get("id")
 
     if (
-        "drive.google.com" in parsed.netloc.lower()
+        "drive.google.com"
+        in parsed.netloc.lower()
         and file_ids
     ):
+
         return (
             "https://drive.google.com/"
             "uc?export=download&id="
@@ -752,6 +968,7 @@ def _write_response_to_file(
         for chunk in response.iter_content(
             8192
         ):
+
             if not chunk:
                 continue
 
@@ -780,7 +997,10 @@ def _extension_from_response(
 ):
     content_type = (
         response.headers
-        .get("Content-Type", "")
+        .get(
+            "Content-Type",
+            "",
+        )
         .split(";")[0]
         .strip()
         .lower()
@@ -791,7 +1011,12 @@ def _extension_from_response(
     )
 
     if extension:
-        extension = extension.lstrip(".").lower()
+
+        extension = (
+            extension
+            .lstrip(".")
+            .lower()
+        )
 
         if extension in ALLOWED_EXT:
             return "." + extension
@@ -802,26 +1027,22 @@ def _extension_from_response(
 
     if (
         path_extension
-        and path_extension.lstrip(".") in ALLOWED_EXT
+        and path_extension.lstrip(".")
+        in ALLOWED_EXT
     ):
         return path_extension
 
     return None
 
 
+# ============================================================
+# GOOGLE DRIVE DOWNLOAD
+# ============================================================
+
 def _drive_download(
     url,
     dest_dir,
 ):
-    """
-    Download a public Google Drive file.
-
-    Handles:
-    /file/d/FILE_ID/view
-    /open?id=FILE_ID
-    /uc?id=FILE_ID
-    """
-
     direct_url = resolve_drive_link(url)
 
     session = requests.Session()
@@ -838,7 +1059,10 @@ def _drive_download(
 
     content_type = (
         response.headers
-        .get("Content-Type", "")
+        .get(
+            "Content-Type",
+            "",
+        )
         .lower()
     )
 
@@ -888,14 +1112,19 @@ def _drive_download(
 
                 content_type = (
                     response.headers
-                    .get("Content-Type", "")
+                    .get(
+                        "Content-Type",
+                        "",
+                    )
                     .lower()
                 )
 
         if "text/html" in content_type:
+
             raise ValueError(
-                "Google Drive did not return the media file. "
-                "Make sure the file is publicly accessible."
+                "Google Drive did not return "
+                "the media file. Make sure the "
+                "file is publicly accessible."
             )
 
     extension = _extension_from_response(
@@ -904,9 +1133,11 @@ def _drive_download(
     )
 
     if not extension:
+
         raise ValueError(
-            "Couldn't determine whether the Google Drive "
-            "file is a supported photo or video."
+            "Couldn't determine whether the "
+            "Google Drive file is a supported "
+            "photo or video."
         )
 
     path = os.path.join(
@@ -920,20 +1151,18 @@ def _drive_download(
     )
 
 
+# ============================================================
+# DIRECT URL DOWNLOAD
+# ============================================================
+
 def download_from_url(
     url,
     dest_dir,
 ):
-    """
-    Download a direct image/video URL.
-
-    Google Drive URLs are routed through
-    the Google Drive downloader.
-    """
-
     url = url.strip()
 
     if is_google_drive_url(url):
+
         return _drive_download(
             url,
             dest_dir,
@@ -955,9 +1184,11 @@ def download_from_url(
     )
 
     if not extension:
+
         raise ValueError(
-            "Couldn't determine whether that link "
-            "is a supported photo or video."
+            "Couldn't determine whether "
+            "that link is a supported "
+            "photo or video."
         )
 
     path = os.path.join(
@@ -980,6 +1211,7 @@ def download_youtube_video(
     dest_dir,
 ):
     if yt_dlp is None:
+
         raise RuntimeError(
             "yt-dlp is not installed on the server."
         )
@@ -1037,7 +1269,9 @@ def download_youtube_video(
             )
 
             requested_downloads = (
-                info.get("requested_downloads")
+                info.get(
+                    "requested_downloads"
+                )
                 or []
             )
 
@@ -1072,6 +1306,7 @@ def download_youtube_video(
                 ".webm",
                 ".mov",
             ):
+
                 candidate_paths.append(
                     base_path + extension
                 )
@@ -1093,7 +1328,8 @@ def download_youtube_video(
 
                 if filename.lower().endswith(
                     tuple(
-                        "." + ext
+                        "."
+                        + ext
                         for ext in VIDEO_EXT
                     )
                 ):
@@ -1116,8 +1352,8 @@ def download_youtube_video(
                 return videos[0]
 
             raise RuntimeError(
-                "yt-dlp completed but no video "
-                "file was produced."
+                "yt-dlp completed but no "
+                "video file was produced."
             )
 
     except Exception as exc:
@@ -1125,30 +1361,35 @@ def download_youtube_video(
         message = str(exc)
 
         if "429" in message:
+
             raise RuntimeError(
                 "YouTube temporarily rate-limited "
                 "the download. Please try again later."
             ) from exc
 
         if "Sign in" in message:
+
             raise RuntimeError(
                 "This YouTube video requires sign-in "
                 "and cannot be downloaded by the server."
             ) from exc
 
         if "Private video" in message:
+
             raise RuntimeError(
                 "This is a private YouTube video."
             ) from exc
 
         if "not available" in message.lower():
+
             raise RuntimeError(
                 "This YouTube video is unavailable "
                 "or restricted."
             ) from exc
 
         raise RuntimeError(
-            f"Unable to download the YouTube video: {message}"
+            f"Unable to download the YouTube video: "
+            f"{message}"
         ) from exc
 
 
@@ -1163,6 +1404,7 @@ def download_media_from_link(
     url = url.strip()
 
     if not url:
+
         raise ValueError(
             "Please provide a link."
         )
@@ -1181,7 +1423,7 @@ def download_media_from_link(
 
 
 # ============================================================
-# ROUTES
+# HOME
 # ============================================================
 
 @app.route(
@@ -1277,7 +1519,9 @@ def add_known():
         f"{cleaned_name}.{extension}",
     )
 
-    file.save(save_path)
+    file.save(
+        save_path
+    )
 
     try:
 
@@ -1291,7 +1535,9 @@ def add_known():
 
         if not encodings:
 
-            os.remove(save_path)
+            os.remove(
+                save_path
+            )
 
             flash(
                 f"No face detected in the photo "
@@ -1342,7 +1588,8 @@ def remove_known(name):
     ):
 
         if (
-            os.path.splitext(filename)[0] == name
+            os.path.splitext(filename)[0]
+            == name
             and allowed_file(filename)
         ):
 
@@ -1388,9 +1635,9 @@ def analyze():
 
     try:
 
-        # ----------------------------------------------------
+        # ====================================================
         # DEVICE UPLOAD
-        # ----------------------------------------------------
+        # ====================================================
 
         if file and file.filename:
 
@@ -1438,9 +1685,9 @@ def analyze():
                 upload_path
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # LINK
-        # ----------------------------------------------------
+        # ====================================================
 
         elif url:
 
@@ -1487,9 +1734,9 @@ def analyze():
                     url_for("index")
                 )
 
-        # ----------------------------------------------------
+        # ====================================================
         # NOTHING PROVIDED
-        # ----------------------------------------------------
+        # ====================================================
 
         else:
 
@@ -1502,9 +1749,9 @@ def analyze():
                 url_for("index")
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # LOAD KNOWN PEOPLE
-        # ----------------------------------------------------
+        # ====================================================
 
         known_encodings, known_names = (
             load_known_faces()
@@ -1522,9 +1769,9 @@ def analyze():
             else "image"
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # IMAGE
-        # ----------------------------------------------------
+        # ====================================================
 
         if media_type == "image":
 
@@ -1543,9 +1790,9 @@ def analyze():
 
             sampled_frames = 1
 
-        # ----------------------------------------------------
+        # ====================================================
         # VIDEO
-        # ----------------------------------------------------
+        # ====================================================
 
         else:
 
@@ -1573,9 +1820,9 @@ def analyze():
                 frames
             )
 
-        # ----------------------------------------------------
+        # ====================================================
         # FACE ANALYSIS
-        # ----------------------------------------------------
+        # ====================================================
 
         (
             persons_raw,
@@ -1591,12 +1838,11 @@ def analyze():
             persons_raw
         )
 
-        # ----------------------------------------------------
+        # ====================================================
         # RESULT
-        # ----------------------------------------------------
+        # ====================================================
 
         result = {
-
             "media_type": media_type,
 
             "preview_image": (
@@ -1664,7 +1910,9 @@ def analyze():
 
         if (
             upload_path
-            and os.path.exists(upload_path)
+            and os.path.exists(
+                upload_path
+            )
         ):
 
             try:
