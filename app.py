@@ -1255,6 +1255,17 @@ def download_youtube_video(
         "http_headers": DOWNLOAD_HEADERS,
 
         "ffmpeg_location": ffmpeg_path,
+
+        # Cloud/datacenter IPs (Render, AWS, etc.) get hit with YouTube's
+        # "Sign in to confirm you're not a bot" challenge far more than
+        # residential IPs, regardless of the video. Identifying as the tv
+        # or mobile player clients instead of the default web client avoids
+        # that challenge in most cases, with no account/cookies needed.
+        "extractor_args": {
+            "youtube": {
+                "player_client": ["tv", "web_safari", "android"],
+            }
+        },
     }
 
     try:
@@ -1359,6 +1370,7 @@ def download_youtube_video(
     except Exception as exc:
 
         message = str(exc)
+        message_lower = message.lower()
 
         if "429" in message:
 
@@ -1367,20 +1379,44 @@ def download_youtube_video(
                 "the download. Please try again later."
             ) from exc
 
-        if "Sign in" in message:
+        # YouTube's automated-traffic challenge. This is about the
+        # server's IP reputation, not the specific video - it fires on
+        # cloud/datacenter IPs (Render, AWS, etc.) far more than on
+        # residential ones. Checked before the generic "Sign in" branch
+        # below, since this message also contains the words "Sign in".
+        if "not a bot" in message_lower:
+
+            raise RuntimeError(
+                "YouTube blocked this download as automated traffic "
+                "(a known issue for server-hosted downloads, unrelated "
+                "to this specific video). Please try again in a bit, "
+                "or try a different video."
+            ) from exc
+
+        # Checked before the generic "Sign in" branch below, since this
+        # message also contains the words "Sign in if you've been
+        # granted access to this video".
+        if "private video" in message_lower:
+
+            raise RuntimeError(
+                "This is a private YouTube video."
+            ) from exc
+
+        if "confirm your age" in message_lower:
+
+            raise RuntimeError(
+                "This YouTube video is age-restricted and "
+                "cannot be downloaded by the server."
+            ) from exc
+
+        if "sign in" in message_lower:
 
             raise RuntimeError(
                 "This YouTube video requires sign-in "
                 "and cannot be downloaded by the server."
             ) from exc
 
-        if "Private video" in message:
-
-            raise RuntimeError(
-                "This is a private YouTube video."
-            ) from exc
-
-        if "not available" in message.lower():
+        if "not available" in message_lower:
 
             raise RuntimeError(
                 "This YouTube video is unavailable "
