@@ -1971,17 +1971,6 @@ def add_known():
         "photo"
     )
 
-    if not name:
-
-        flash(
-            "Please provide a name.",
-            "error",
-        )
-
-        return redirect(
-            url_for("index")
-        )
-
     if not file or file.filename == "":
 
         flash(
@@ -2006,56 +1995,183 @@ def add_known():
             url_for("index")
         )
 
-    cleaned_name = safe_name(
-        name
+    is_video = is_video_file(
+        file.filename
     )
 
-    if not cleaned_name:
+    extension = ext_of(
+        file.filename
+    )
 
-        flash(
-            "Please provide a valid name.",
-            "error",
+    temp_path = os.path.join(
+        UPLOADS_DIR,
+        f"known_temp_{uuid.uuid4().hex}.{extension}",
+    )
+
+    file.save(
+        temp_path
+    )
+
+    try:
+
+        known_encodings, known_names = load_known_faces(
+            known_dir
         )
 
-        return redirect(
-            url_for("index")
-        )
+        if is_video:
 
-    # Replacing an existing person shouldn't leave a stale duplicate
-    # around under a different extension (e.g. a prior .png next to a
-    # freshly re-recorded .jpg), which would otherwise show up twice.
-    for existing in os.listdir(known_dir):
-        if (
-            os.path.splitext(existing)[0] == cleaned_name
-            and allowed_file(existing)
-            and not is_video_file(existing)
-        ):
-            try:
-                os.remove(os.path.join(known_dir, existing))
-            except OSError:
-                pass
-
-    if is_video_file(file.filename):
-
-        extension = ext_of(file.filename)
-
-        temp_path = os.path.join(
-            UPLOADS_DIR,
-            f"known_temp_{uuid.uuid4().hex}.{extension}",
-        )
-
-        file.save(temp_path)
-
-        try:
-
-            frames, _duration, _fps, _total = sample_video_frames(
+            frames, duration, _fps, _total = sample_video_frames(
                 temp_path
             )
 
-            best = (
-                _best_reference_frame(frames)
-                if frames
-                else None
+            media_type = "video"
+            sampled_frames = len(frames)
+
+        else:
+
+            rgb = face_recognition.load_image_file(
+                temp_path
+            )
+
+            frames = [(0.0, rgb)]
+            media_type = "image"
+            duration = None
+            sampled_frames = None
+
+        if not frames:
+
+            flash(
+                "Couldn't read that video.",
+                "error",
+            )
+
+            return redirect(
+                url_for("index")
+            )
+
+        # Detect everyone in the shot before deciding what to do - a
+        # solo photo/clip saves directly under the typed name (the
+        # common case, no extra taps), but a shot with several people
+        # in it (e.g. a group photo) shows all of them so each unknown
+        # face can be named and saved individually, same as an
+        # Unknown Person card from a regular analysis.
+        persons_raw, total_detections, preview = analyze_frames(
+            frames,
+            known_encodings,
+            known_names,
+        )
+
+        if len(persons_raw) == 0:
+
+            flash(
+                f"No face detected in that "
+                f"{'recording' if is_video else 'photo'}. Try "
+                f"again with better lighting, or facing the "
+                f"camera directly.",
+                "error",
+            )
+
+            return redirect(
+                url_for("index")
+            )
+
+        if len(persons_raw) > 1:
+
+            # ------------------------------------------------
+            # GROUP SHOT: hand off to the same results view
+            # Unknown Person cards already use for saving faces
+            # ------------------------------------------------
+
+            result = finalize_analysis_result(
+                persons_raw,
+                total_detections,
+                preview,
+                media_type,
+                temp_path,
+                sampled_frames=sampled_frames,
+                duration=duration,
+                enable_playback=False,
+            )
+
+            flash(
+                f"Detected {len(result['persons'])} people in "
+                f"that shot. Save whichever ones you'd like below.",
+                "success",
+            )
+
+            return render_template(
+                "index.html",
+                app_name=APP_NAME,
+                user=user,
+                known_people=list_known_people(
+                    known_dir
+                ),
+                result=result,
+            )
+
+        # ------------------------------------------------------
+        # EXACTLY ONE PERSON: the simple, common case
+        # ------------------------------------------------------
+
+        only_label, only_person = next(
+            iter(persons_raw.items())
+        )
+
+        if only_person["is_known"]:
+
+            flash(
+                f"That looks like '{only_label}', who's "
+                f"already saved.",
+                "error",
+            )
+
+            return redirect(
+                url_for("index")
+            )
+
+        if not name:
+
+            flash(
+                "Please provide a name.",
+                "error",
+            )
+
+            return redirect(
+                url_for("index")
+            )
+
+        cleaned_name = safe_name(
+            name
+        )
+
+        if not cleaned_name:
+
+            flash(
+                "Please provide a valid name.",
+                "error",
+            )
+
+            return redirect(
+                url_for("index")
+            )
+
+        # Replacing an existing person shouldn't leave a stale
+        # duplicate around under a different extension.
+        for existing in os.listdir(known_dir):
+            if (
+                os.path.splitext(existing)[0] == cleaned_name
+                and allowed_file(existing)
+                and not is_video_file(existing)
+            ):
+                try:
+                    os.remove(os.path.join(known_dir, existing))
+                except OSError:
+                    pass
+
+        if is_video:
+
+            best = _best_reference_frame(
+                frames
             )
 
             if not best:
@@ -2073,85 +2189,42 @@ def add_known():
 
             cropped_image, _encoding = best
 
-            save_path = os.path.join(
-                known_dir,
-                f"{cleaned_name}.jpg",
+        else:
+
+            location = _locate_faces_fast(
+                frames[0][1]
+            )[0]
+
+            cropped_image = _crop_face_region(
+                frames[0][1],
+                location,
+                pad_ratio=0.6,
             )
-
-            cropped_image.save(
-                save_path,
-                format="JPEG",
-                quality=90,
-            )
-
-        finally:
-
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
-
-    else:
-
-        extension = ext_of(
-            file.filename
-        )
 
         save_path = os.path.join(
             known_dir,
-            f"{cleaned_name}.{extension}",
+            f"{cleaned_name}.jpg",
         )
 
-        file.save(
-            save_path
+        cropped_image.save(
+            save_path,
+            format="JPEG",
+            quality=90,
         )
 
-        try:
+        flash(
+            f"Added '{name}' to known people.",
+            "success",
+        )
 
-            image = face_recognition.load_image_file(
-                save_path
-            )
+        return redirect(
+            url_for("index")
+        )
 
-            encodings = face_recognition.face_encodings(
-                image
-            )
+    finally:
 
-            if not encodings:
-
-                os.remove(
-                    save_path
-                )
-
-                flash(
-                    f"No face detected in the photo "
-                    f"for '{name}'. Try another photo.",
-                    "error",
-                )
-
-                return redirect(
-                    url_for("index")
-                )
-
-        except Exception as exc:
-
-            if os.path.exists(save_path):
-                os.remove(save_path)
-
-            flash(
-                f"Could not process the photo: {exc}",
-                "error",
-            )
-
-            return redirect(
-                url_for("index")
-            )
-
-    flash(
-        f"Added '{name}' to known people.",
-        "success",
-    )
-
-    return redirect(
-        url_for("index")
-    )
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 # ============================================================
@@ -2316,6 +2389,114 @@ def remove_known(name):
     return redirect(
         url_for("index")
     )
+
+
+def finalize_analysis_result(
+    persons_raw,
+    total_detections,
+    preview,
+    media_type,
+    upload_path,
+    sampled_frames=None,
+    duration=None,
+    enable_playback=True,
+):
+    """
+    Builds the same result dict shape the analyze results template expects,
+    from an already-computed analyze_frames() output. Kept separate from
+    running analyze_frames itself so callers that need to inspect the raw
+    detections first (add_known's single-vs-group-photo check) don't have
+    to run face detection twice.
+
+    If enable_playback and media_type == "video", upload_path is MOVED
+    (not copied) into PLAYBACK_DIR as a side effect - the caller's own
+    cleanup of upload_path should account for it possibly no longer
+    existing at that path afterward.
+    """
+
+    persons = finalize_persons(
+        persons_raw
+    )
+
+    video_url = None
+
+    if media_type == "video" and enable_playback:
+
+        media_filename = os.path.basename(
+            upload_path
+        )
+
+        token = uuid.uuid4().hex
+
+        playback_path = os.path.join(
+            PLAYBACK_DIR,
+            f"{token}.{ext_of(media_filename)}",
+        )
+
+        try:
+            shutil.move(upload_path, playback_path)
+
+            session["playback"] = {
+                "token": token,
+                "path": playback_path,
+                "mimetype": guess_video_mimetype(media_filename),
+            }
+
+            video_url = url_for(
+                "serve_playback",
+                token=token,
+            )
+
+        except OSError:
+            video_url = None
+
+    return {
+        "media_type": media_type,
+
+        "video_url": video_url,
+
+        "preview_image": (
+            image_to_base64(
+                preview
+            )
+            if preview is not None
+            else None
+        ),
+
+        "persons": persons,
+
+        "total_unique": len(
+            persons
+        ),
+
+        "known_count": sum(
+            1
+            for person in persons
+            if person["is_known"]
+        ),
+
+        "unknown_count": sum(
+            1
+            for person in persons
+            if not person["is_known"]
+        ),
+
+        "total_detections": (
+            total_detections
+        ),
+
+        "duration": (
+            round(duration)
+            if duration
+            else None
+        ),
+
+        "sampled_frames": (
+            sampled_frames
+            if media_type == "video"
+            else None
+        ),
+    }
 
 
 # ============================================================
@@ -2532,109 +2713,29 @@ def analyze():
             )
 
         # ====================================================
-        # FACE ANALYSIS
+        # FACE ANALYSIS + RESULT
         # ====================================================
 
-        (
-            persons_raw,
-            total_detections,
-            preview,
-        ) = analyze_frames(
+        persons_raw, total_detections, preview = analyze_frames(
             frames,
             known_encodings,
             known_names,
         )
 
-        persons = finalize_persons(
-            persons_raw
+        result = finalize_analysis_result(
+            persons_raw,
+            total_detections,
+            preview,
+            media_type,
+            upload_path,
+            sampled_frames=sampled_frames if media_type == "video" else None,
+            duration=duration if media_type == "video" else None,
         )
 
-        # ====================================================
-        # RESULT
-        # ====================================================
-
-        video_url = None
-
-        if media_type == "video":
-
-            token = uuid.uuid4().hex
-
-            playback_path = os.path.join(
-                PLAYBACK_DIR,
-                f"{token}.{ext_of(media_filename)}",
-            )
-
-            try:
-                shutil.move(upload_path, playback_path)
-
-                session["playback"] = {
-                    "token": token,
-                    "path": playback_path,
-                    "mimetype": guess_video_mimetype(media_filename),
-                }
-
-                video_url = url_for(
-                    "serve_playback",
-                    token=token,
-                )
-
-                # It's been moved to PLAYBACK_DIR now, so the `finally`
-                # block below should not try to delete the old path.
-                upload_path = None
-
-            except OSError:
-                # Couldn't move it (e.g. cross-device on some hosts) -
-                # playback just won't be available for this result;
-                # the analysis itself still succeeded.
-                video_url = None
-
-        result = {
-            "media_type": media_type,
-
-            "video_url": video_url,
-
-            "preview_image": (
-                image_to_base64(
-                    preview
-                )
-                if preview is not None
-                else None
-            ),
-
-            "persons": persons,
-
-            "total_unique": len(
-                persons
-            ),
-
-            "known_count": sum(
-                1
-                for person in persons
-                if person["is_known"]
-            ),
-
-            "unknown_count": sum(
-                1
-                for person in persons
-                if not person["is_known"]
-            ),
-
-            "total_detections": (
-                total_detections
-            ),
-
-            "duration": (
-                round(duration)
-                if duration
-                else None
-            ),
-
-            "sampled_frames": (
-                sampled_frames
-                if media_type == "video"
-                else None
-            ),
-        }
+        if media_type == "video" and result["video_url"]:
+            # Moved into PLAYBACK_DIR by finalize_analysis_result - the
+            # `finally` block below should not try to delete it again.
+            upload_path = None
 
         return render_template(
             "index.html",
