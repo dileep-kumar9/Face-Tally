@@ -141,7 +141,7 @@ def init_db():
 init_db()
 
 
-USERNAME_RE = re.compile(r"^[A-Za-z0-9_]{3,32}$")
+USERNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-@]{2,62}$")
 
 
 def create_user(username, password):
@@ -151,7 +151,8 @@ def create_user(username, password):
 
     if not USERNAME_RE.match(username):
         raise ValueError(
-            "Username must be 3-32 characters: letters, numbers, or underscore only."
+            "Username must be 3-64 characters: letters, numbers, "
+            "underscore, period, hyphen, or @ (so an email address works too)."
         )
 
     if len(password) < 6:
