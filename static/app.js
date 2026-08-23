@@ -301,7 +301,7 @@
 
 
     // ============================================================
-    // IN-PAGE CAMERA (for Known People)
+    // IN-PAGE CAMERA / RECORDER (shared by Known People + Upload)
     // ============================================================
     // The HTML `capture` attribute on a file input is only a hint, and
     // is documented as inconsistent across Android versions/browsers -
@@ -310,16 +310,33 @@
     // happen ahead of time. Using getUserMedia() instead gives a camera
     // view fully under this page's own control, which doesn't depend on
     // the OS file-picker/camera-app handoff working correctly at all.
+    //
+    // One modal serves four buttons:
+    //   known-camera-btn  -> photo,  target = known-photo-input
+    //   known-record-btn  -> video,  target = known-photo-input, auto-stops
+    //                         after a few seconds (picking a good reference
+    //                         frame server-side doesn't need a long clip)
+    //   media-camera-btn  -> photo,  target = media-input
+    //   media-record-btn  -> video,  target = media-input, manual start/stop
+    //                         (an analysis recording can be any length)
 
-    const cameraBtn = document.getElementById("known-camera-btn");
     const cameraModal = document.getElementById("camera-modal");
     const cameraPreview = document.getElementById("camera-preview");
     const cameraCanvas = document.getElementById("camera-canvas");
     const cameraShootBtn = document.getElementById("camera-shoot-btn");
+    const cameraRecordBtn = document.getElementById("camera-record-btn");
     const cameraCancelBtn = document.getElementById("camera-cancel-btn");
     const cameraStatus = document.getElementById("camera-modal-status");
+    const cameraTimer = document.getElementById("camera-modal-timer");
 
     let cameraStream = null;
+    let mediaRecorder = null;
+    let recordedChunks = [];
+    let recordTimerInterval = null;
+    let recordElapsedSeconds = 0;
+    let cameraTargetInput = null;
+    let cameraMode = "photo";
+    let cameraAutoStopSeconds = null;
 
     function stopCameraStream() {
         if (cameraStream) {
@@ -329,92 +346,209 @@
         if (cameraPreview) cameraPreview.srcObject = null;
     }
 
+    function pickSupportedRecordingMimeType() {
+        const candidates = [
+            "video/mp4",
+            "video/webm;codecs=vp9",
+            "video/webm;codecs=vp8",
+            "video/webm",
+        ];
+        if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "";
+        for (const type of candidates) {
+            if (MediaRecorder.isTypeSupported(type)) return type;
+        }
+        return "";
+    }
+
+    function formatElapsed(totalSeconds) {
+        const m = Math.floor(totalSeconds / 60);
+        const s = totalSeconds % 60;
+        return `${m}:${String(s).padStart(2, "0")}`;
+    }
+
+    function resetCameraUI() {
+        if (cameraShootBtn) cameraShootBtn.hidden = cameraMode !== "photo";
+
+        const isAutoRecord = cameraMode === "video" && cameraAutoStopSeconds;
+        if (cameraRecordBtn) {
+            cameraRecordBtn.hidden = cameraMode !== "video" || !!isAutoRecord;
+            cameraRecordBtn.textContent = "Start recording";
+            cameraRecordBtn.classList.remove("recording");
+        }
+        if (cameraTimer) cameraTimer.textContent = "";
+
+        clearInterval(recordTimerInterval);
+        recordTimerInterval = null;
+        recordElapsedSeconds = 0;
+    }
+
     function closeCameraModal() {
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+            mediaRecorder.stop();
+        }
         stopCameraStream();
         if (cameraModal) cameraModal.hidden = true;
         if (cameraStatus) cameraStatus.textContent = "";
+        resetCameraUI();
     }
 
-    async function openCameraModal() {
+    function funnelFileInto(input, file) {
+        if (!input || !file) return;
+        const dataTransfer = new DataTransfer();
+        dataTransfer.items.add(file);
+        input.files = dataTransfer.files;
+        input.dispatchEvent(new Event("change", { bubbles: true }));
+    }
 
-        if (!cameraModal || !cameraPreview) return;
+    function takePhoto() {
+        if (!cameraPreview || !cameraPreview.videoWidth || !cameraTargetInput) return;
+
+        cameraCanvas.width = cameraPreview.videoWidth;
+        cameraCanvas.height = cameraPreview.videoHeight;
+        cameraCanvas.getContext("2d").drawImage(cameraPreview, 0, 0);
+
+        cameraCanvas.toBlob((blob) => {
+            if (!blob) return;
+            funnelFileInto(
+                cameraTargetInput,
+                new File([blob], "camera-photo.jpg", { type: "image/jpeg" })
+            );
+            closeCameraModal();
+        }, "image/jpeg", 0.9);
+    }
+
+    function startRecording() {
+        if (!cameraStream || !cameraTargetInput) return;
+
+        recordedChunks = [];
+        const mimeType = pickSupportedRecordingMimeType();
+
+        try {
+            mediaRecorder = mimeType
+                ? new MediaRecorder(cameraStream, { mimeType })
+                : new MediaRecorder(cameraStream);
+        } catch (error) {
+            if (cameraStatus) cameraStatus.textContent = "Recording isn't supported in this browser.";
+            return;
+        }
+
+        mediaRecorder.ondataavailable = (event) => {
+            if (event.data && event.data.size > 0) recordedChunks.push(event.data);
+        };
+
+        mediaRecorder.onstop = () => {
+            const type = mediaRecorder.mimeType || "video/webm";
+            const blob = new Blob(recordedChunks, { type });
+            const ext = type.includes("mp4") ? "mp4" : "webm";
+            funnelFileInto(
+                cameraTargetInput,
+                new File([blob], `camera-recording.${ext}`, { type })
+            );
+            closeCameraModal();
+        };
+
+        mediaRecorder.start();
+
+        if (cameraRecordBtn) {
+            cameraRecordBtn.textContent = "Stop recording";
+            cameraRecordBtn.classList.add("recording");
+        }
+
+        recordElapsedSeconds = 0;
+        if (cameraTimer) cameraTimer.textContent = formatElapsed(0);
+
+        recordTimerInterval = setInterval(() => {
+            recordElapsedSeconds += 1;
+            if (cameraTimer) cameraTimer.textContent = formatElapsed(recordElapsedSeconds);
+            if (cameraAutoStopSeconds && recordElapsedSeconds >= cameraAutoStopSeconds) {
+                stopRecording();
+            }
+        }, 1000);
+    }
+
+    function stopRecording() {
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+            mediaRecorder.stop();
+        }
+        clearInterval(recordTimerInterval);
+        recordTimerInterval = null;
+    }
+
+    function toggleRecording() {
+        if (mediaRecorder && mediaRecorder.state === "recording") {
+            stopRecording();
+        } else {
+            startRecording();
+        }
+    }
+
+    async function openCamera(targetInput, mode, autoStopSeconds) {
+        if (!cameraModal || !cameraPreview || !targetInput) return;
+
+        cameraTargetInput = targetInput;
+        cameraMode = mode;
+        cameraAutoStopSeconds = autoStopSeconds || null;
+        resetCameraUI();
+        cameraModal.hidden = false;
 
         if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
             if (cameraStatus) {
                 cameraStatus.textContent =
                     "Camera access isn't available in this browser. " +
-                    "Use \u201cChoose reference photo\u201d instead.";
+                    "Use the file picker instead.";
             }
-            cameraModal.hidden = false;
             return;
         }
 
-        cameraModal.hidden = false;
         if (cameraStatus) cameraStatus.textContent = "Requesting camera access\u2026";
 
         try {
             cameraStream = await navigator.mediaDevices.getUserMedia({
                 video: { facingMode: "user" },
-                audio: false,
+                audio: mode === "video",
             });
             cameraPreview.srcObject = cameraStream;
             if (cameraStatus) cameraStatus.textContent = "";
+
+            if (mode === "video" && cameraAutoStopSeconds) {
+                startRecording();
+            }
         } catch (error) {
             if (cameraStatus) {
                 cameraStatus.textContent =
                     "Couldn't access the camera (permission denied, or " +
-                    "none available). Use \u201cChoose reference photo\u201d instead.";
+                    "none available). Use the file picker instead.";
             }
         }
     }
 
-    function takePhotoFromCamera() {
-
-        if (!cameraPreview || !cameraPreview.videoWidth || !knownPhotoInput) return;
-
-        cameraCanvas.width = cameraPreview.videoWidth;
-        cameraCanvas.height = cameraPreview.videoHeight;
-
-        const context = cameraCanvas.getContext("2d");
-        context.drawImage(cameraPreview, 0, 0);
-
-        cameraCanvas.toBlob((blob) => {
-
-            if (!blob) return;
-
-            const file = new File(
-                [blob],
-                "camera-photo.jpg",
-                { type: "image/jpeg" }
-            );
-
-            const dataTransfer = new DataTransfer();
-            dataTransfer.items.add(file);
-            knownPhotoInput.files = dataTransfer.files;
-
-            knownPhotoInput.dispatchEvent(
-                new Event("change", { bubbles: true })
-            );
-
-            closeCameraModal();
-
-        }, "image/jpeg", 0.9);
-    }
-
-    if (cameraBtn) {
-        cameraBtn.addEventListener("click", openCameraModal);
-    }
-
-    if (cameraShootBtn) {
-        cameraShootBtn.addEventListener("click", takePhotoFromCamera);
-    }
-
-    if (cameraCancelBtn) {
-        cameraCancelBtn.addEventListener("click", closeCameraModal);
-    }
+    if (cameraShootBtn) cameraShootBtn.addEventListener("click", takePhoto);
+    if (cameraRecordBtn) cameraRecordBtn.addEventListener("click", toggleRecording);
+    if (cameraCancelBtn) cameraCancelBtn.addEventListener("click", closeCameraModal);
 
     // Never leave the camera light on if the user navigates away mid-capture.
     window.addEventListener("beforeunload", stopCameraStream);
+
+    const knownCameraBtn = document.getElementById("known-camera-btn");
+    const knownRecordBtn = document.getElementById("known-record-btn");
+    const mediaCameraBtn = document.getElementById("media-camera-btn");
+    const mediaRecordBtn = document.getElementById("media-record-btn");
+
+    if (knownCameraBtn && knownPhotoInput) {
+        knownCameraBtn.addEventListener("click", () => openCamera(knownPhotoInput, "photo"));
+    }
+    if (knownRecordBtn && knownPhotoInput) {
+        // Fixed short auto-clip: enough for the server to pick one clean
+        // frame, without needing a manual stop button for this use case.
+        knownRecordBtn.addEventListener("click", () => openCamera(knownPhotoInput, "video", 4));
+    }
+    if (mediaCameraBtn && mediaInput) {
+        mediaCameraBtn.addEventListener("click", () => openCamera(mediaInput, "photo"));
+    }
+    if (mediaRecordBtn && mediaInput) {
+        // Manual start/stop: a recording meant for analysis can be any length.
+        mediaRecordBtn.addEventListener("click", () => openCamera(mediaInput, "video"));
+    }
 
 
     // ============================================================

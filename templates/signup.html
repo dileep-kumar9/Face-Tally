@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1, viewport-fit=cover"
+    >
+
+    <meta
+        name="theme-color"
+        content="#0c0e14"
+    >
+
+    <link
+        rel="icon"
+        href="{{ url_for('static', filename='icons/icon-192.png') }}"
+    >
+
+    <title>
+        Sign up — {{ app_name }}
+    </title>
+
+    <link
+        rel="stylesheet"
+        href="{{ url_for('static', filename='style.css') }}"
+    >
+
+</head>
+
+<body>
+
+<div class="auth-wrap">
+
+    <div class="auth-card">
+
+        <div class="logo-mark auth-logo">
+
+            <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="#0b0c18"
+                stroke-width="2.2"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+            >
+                <path d="M4 8V5a1 1 0 0 1 1-1h3"/>
+                <path d="M20 8V5a1 1 0 0 0-1-1h-3"/>
+                <path d="M4 16v3a1 1 0 0 0 1 1h3"/>
+                <path d="M20 16v3a1 1 0 0 1-1 1h-3"/>
+                <circle cx="12" cy="12" r="3"/>
+            </svg>
+
+        </div>
+
+        <h1 class="auth-title">
+            {{ app_name }}
+        </h1>
+
+        <p class="auth-subtitle">
+            Create an account for your own known people list
+        </p>
+
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+
+            {% if messages %}
+
+                {% for category, message in messages %}
+
+                    <div class="flash {{ category }}">
+                        {{ message }}
+                    </div>
+
+                {% endfor %}
+
+            {% endif %}
+
+        {% endwith %}
+
+
+        <form
+            class="auth-form"
+            action="{{ url_for('signup') }}"
+            method="post"
+        >
+
+            <input
+                type="text"
+                name="username"
+                placeholder="Username"
+                autocomplete="username"
+                value="{{ username or '' }}"
+                required
+                autofocus
+            >
+
+            <input
+                type="password"
+                name="password"
+                placeholder="Password (min. 6 characters)"
+                autocomplete="new-password"
+                minlength="6"
+                required
+            >
+
+            <input
+                type="password"
+                name="confirm"
+                placeholder="Confirm password"
+                autocomplete="new-password"
+                minlength="6"
+                required
+            >
+
+            <button type="submit">
+                Sign up
+            </button>
+
+        </form>
+
+        <p class="auth-switch">
+            Already have an account?
+            <a href="{{ url_for('login') }}">Log in</a>
+        </p>
+
+    </div>
+
+</div>
+
+</body>
+</html>

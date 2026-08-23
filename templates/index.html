@@ -107,6 +107,29 @@
 
         </div>
 
+        {% if user %}
+
+            <form
+                class="topbar-logout"
+                action="{{ url_for('logout') }}"
+                method="post"
+            >
+
+                <span class="topbar-username">
+                    {{ user.username }}
+                </span>
+
+                <button
+                    type="submit"
+                    class="btn-secondary logout-btn"
+                >
+                    Log out
+                </button>
+
+            </form>
+
+        {% endif %}
+
     </div>
 
 </div>
@@ -216,6 +239,27 @@
         </label>
 
 
+        <div class="known-photo-row upload-capture-row">
+
+            <button
+                type="button"
+                class="file-btn camera-open-btn"
+                id="media-camera-btn"
+            >
+                Take a photo
+            </button>
+
+            <button
+                type="button"
+                class="file-btn camera-open-btn"
+                id="media-record-btn"
+            >
+                Record a video
+            </button>
+
+        </div>
+
+
         <div class="or-divider">
             or paste a link
         </div>
@@ -320,6 +364,14 @@
                     Use camera
                 </button>
 
+                <button
+                    type="button"
+                    class="file-btn camera-open-btn"
+                    id="known-record-btn"
+                >
+                    Record video
+                </button>
+
             </div>
 
 
@@ -333,7 +385,7 @@
 
 
     <!-- ============================================================
-         IN-PAGE CAMERA (for Known People)
+         IN-PAGE CAMERA / RECORDER (shared: Known People + Upload)
     ============================================================ -->
 
     <div class="camera-modal" id="camera-modal" hidden>
@@ -350,6 +402,7 @@
             <canvas id="camera-canvas" hidden></canvas>
 
             <div class="camera-modal-status" id="camera-modal-status"></div>
+            <div class="camera-modal-timer" id="camera-modal-timer"></div>
 
             <div class="camera-modal-actions">
 
@@ -359,6 +412,10 @@
 
                 <button type="button" id="camera-shoot-btn">
                     Take photo
+                </button>
+
+                <button type="button" id="camera-record-btn">
+                    Start recording
                 </button>
 
             </div>
@@ -376,10 +433,16 @@
 
                 <div class="chip">
 
-                    {{ person }}
+                    <img
+                        class="chip-avatar"
+                        src="{{ url_for('known_face_image', name=person.name) }}"
+                        alt=""
+                    >
+
+                    {{ person.name }}
 
                     <form
-                        action="{{ url_for('remove_known', name=person) }}"
+                        action="{{ url_for('remove_known', name=person.name) }}"
                         method="post"
                     >
 

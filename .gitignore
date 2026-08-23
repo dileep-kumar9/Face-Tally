@@ -11,6 +11,9 @@ env/
 uploads/*
 known_faces/*
 
+*.db
+*.db-journal
+
 *.log
 
 .env

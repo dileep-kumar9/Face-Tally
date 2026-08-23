@@ -13,6 +13,8 @@ known_faces/*
 
 *.zip
 *.log
+*.db
+*.db-journal
 
 .vscode
 .idea

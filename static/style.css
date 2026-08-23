@@ -181,6 +181,60 @@ body {
 }
 
 
+.topbar-logout {
+
+    margin-left:
+        auto;
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    gap:
+        8px;
+
+}
+
+
+.topbar-username {
+
+    font-size:
+        0.82rem;
+
+    color:
+        var(--text-muted);
+
+    max-width:
+        90px;
+
+    overflow:
+        hidden;
+
+    text-overflow:
+        ellipsis;
+
+    white-space:
+        nowrap;
+
+}
+
+
+.logout-btn {
+
+    width:
+        auto;
+
+    padding:
+        6px 12px;
+
+    font-size:
+        0.78rem;
+
+}
+
+
 .logo-mark {
 
     width:
@@ -834,6 +888,9 @@ button.btn-secondary:hover {
     display:
         flex;
 
+    flex-wrap:
+        wrap;
+
     gap:
         8px;
 
@@ -843,10 +900,21 @@ button.btn-secondary:hover {
 .known-photo-row .file-btn {
 
     flex:
-        1;
+        1 1 calc(50% - 4px);
+
+    min-width:
+        130px;
 
     text-align:
         center;
+
+}
+
+
+.upload-capture-row .file-btn {
+
+    flex:
+        1 1 calc(50% - 4px);
 
 }
 
@@ -960,6 +1028,29 @@ button.btn-secondary:hover {
 }
 
 
+.camera-modal-timer {
+
+    font-family:
+        var(--font-mono);
+
+    font-size:
+        0.85rem;
+
+    color:
+        var(--amber);
+
+    text-align:
+        center;
+
+    min-height:
+        1.2em;
+
+    margin-top:
+        4px;
+
+}
+
+
 .camera-modal-actions {
 
     display:
@@ -981,6 +1072,17 @@ button.btn-secondary:hover {
 
     width:
         auto;
+
+}
+
+
+#camera-record-btn.recording {
+
+    background:
+        var(--danger);
+
+    color:
+        #1a0808;
 
 }
 
@@ -1015,7 +1117,7 @@ button.btn-secondary:hover {
         20px;
 
     padding:
-        6px 6px 6px 13px;
+        6px 6px 6px 6px;
 
     display:
         flex;
@@ -1024,10 +1126,33 @@ button.btn-secondary:hover {
         center;
 
     gap:
-        6px;
+        7px;
 
     font-size:
         0.85rem;
+
+}
+
+
+.chip-avatar {
+
+    width:
+        22px;
+
+    height:
+        22px;
+
+    border-radius:
+        50%;
+
+    object-fit:
+        cover;
+
+    flex-shrink:
+        0;
+
+    background:
+        var(--surface);
 
 }
 
@@ -2041,5 +2166,145 @@ details.manage-known .add-known-form {
             0.61rem;
 
     }
+
+}
+
+
+/* ============================================================
+   AUTH PAGES (login / signup)
+============================================================ */
+
+.auth-wrap {
+
+    min-height:
+        100vh;
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        center;
+
+    padding:
+        24px 16px;
+
+}
+
+
+.auth-card {
+
+    width:
+        100%;
+
+    max-width:
+        360px;
+
+    background:
+        var(--surface);
+
+    border:
+        1px solid
+        var(--border);
+
+    border-radius:
+        var(--radius);
+
+    padding:
+        28px 24px;
+
+    text-align:
+        center;
+
+}
+
+
+.auth-logo {
+
+    margin:
+        0 auto 16px;
+
+}
+
+
+.auth-title {
+
+    font-family:
+        var(--font-display);
+
+    font-size:
+        1.3rem;
+
+    margin:
+        0;
+
+}
+
+
+.auth-subtitle {
+
+    color:
+        var(--text-muted);
+
+    font-size:
+        0.85rem;
+
+    margin:
+        6px 0 20px;
+
+}
+
+
+.auth-form {
+
+    display:
+        flex;
+
+    flex-direction:
+        column;
+
+    gap:
+        10px;
+
+    text-align:
+        left;
+
+}
+
+
+.auth-switch {
+
+    margin-top:
+        18px;
+
+    font-size:
+        0.85rem;
+
+    color:
+        var(--text-muted);
+
+}
+
+
+.auth-switch a {
+
+    color:
+        var(--accent);
+
+    text-decoration:
+        none;
+
+    font-weight:
+        600;
+
+}
+
+
+.auth-switch a:hover {
+
+    text-decoration:
+        underline;
 
 }
