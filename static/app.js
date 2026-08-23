@@ -300,37 +300,121 @@
     }
 
 
-    const knownCameraInput =
-        document.getElementById(
-            "known-camera-input"
-        );
+    // ============================================================
+    // IN-PAGE CAMERA (for Known People)
+    // ============================================================
+    // The HTML `capture` attribute on a file input is only a hint, and
+    // is documented as inconsistent across Android versions/browsers -
+    // sometimes it opens the camera app directly, sometimes it silently
+    // falls back to the plain file picker with no way to tell which will
+    // happen ahead of time. Using getUserMedia() instead gives a camera
+    // view fully under this page's own control, which doesn't depend on
+    // the OS file-picker/camera-app handoff working correctly at all.
 
-    if (knownCameraInput && knownPhotoInput) {
+    const cameraBtn = document.getElementById("known-camera-btn");
+    const cameraModal = document.getElementById("camera-modal");
+    const cameraPreview = document.getElementById("camera-preview");
+    const cameraCanvas = document.getElementById("camera-canvas");
+    const cameraShootBtn = document.getElementById("camera-shoot-btn");
+    const cameraCancelBtn = document.getElementById("camera-cancel-btn");
+    const cameraStatus = document.getElementById("camera-modal-status");
 
-        knownCameraInput.addEventListener(
-            "change",
-            () => {
+    let cameraStream = null;
 
-                const file =
-                    knownCameraInput.files &&
-                    knownCameraInput.files[0];
-
-                if (!file) {
-                    return;
-                }
-
-                const dataTransfer = new DataTransfer();
-                dataTransfer.items.add(file);
-                knownPhotoInput.files = dataTransfer.files;
-
-                knownPhotoInput.dispatchEvent(
-                    new Event("change", { bubbles: true })
-                );
-
-            }
-        );
-
+    function stopCameraStream() {
+        if (cameraStream) {
+            cameraStream.getTracks().forEach((track) => track.stop());
+            cameraStream = null;
+        }
+        if (cameraPreview) cameraPreview.srcObject = null;
     }
+
+    function closeCameraModal() {
+        stopCameraStream();
+        if (cameraModal) cameraModal.hidden = true;
+        if (cameraStatus) cameraStatus.textContent = "";
+    }
+
+    async function openCameraModal() {
+
+        if (!cameraModal || !cameraPreview) return;
+
+        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+            if (cameraStatus) {
+                cameraStatus.textContent =
+                    "Camera access isn't available in this browser. " +
+                    "Use \u201cChoose reference photo\u201d instead.";
+            }
+            cameraModal.hidden = false;
+            return;
+        }
+
+        cameraModal.hidden = false;
+        if (cameraStatus) cameraStatus.textContent = "Requesting camera access\u2026";
+
+        try {
+            cameraStream = await navigator.mediaDevices.getUserMedia({
+                video: { facingMode: "user" },
+                audio: false,
+            });
+            cameraPreview.srcObject = cameraStream;
+            if (cameraStatus) cameraStatus.textContent = "";
+        } catch (error) {
+            if (cameraStatus) {
+                cameraStatus.textContent =
+                    "Couldn't access the camera (permission denied, or " +
+                    "none available). Use \u201cChoose reference photo\u201d instead.";
+            }
+        }
+    }
+
+    function takePhotoFromCamera() {
+
+        if (!cameraPreview || !cameraPreview.videoWidth || !knownPhotoInput) return;
+
+        cameraCanvas.width = cameraPreview.videoWidth;
+        cameraCanvas.height = cameraPreview.videoHeight;
+
+        const context = cameraCanvas.getContext("2d");
+        context.drawImage(cameraPreview, 0, 0);
+
+        cameraCanvas.toBlob((blob) => {
+
+            if (!blob) return;
+
+            const file = new File(
+                [blob],
+                "camera-photo.jpg",
+                { type: "image/jpeg" }
+            );
+
+            const dataTransfer = new DataTransfer();
+            dataTransfer.items.add(file);
+            knownPhotoInput.files = dataTransfer.files;
+
+            knownPhotoInput.dispatchEvent(
+                new Event("change", { bubbles: true })
+            );
+
+            closeCameraModal();
+
+        }, "image/jpeg", 0.9);
+    }
+
+    if (cameraBtn) {
+        cameraBtn.addEventListener("click", openCameraModal);
+    }
+
+    if (cameraShootBtn) {
+        cameraShootBtn.addEventListener("click", takePhotoFromCamera);
+    }
+
+    if (cameraCancelBtn) {
+        cameraCancelBtn.addEventListener("click", closeCameraModal);
+    }
+
+    // Never leave the camera light on if the user navigates away mid-capture.
+    window.addEventListener("beforeunload", stopCameraStream);
 
 
     // ============================================================
@@ -428,8 +512,8 @@
         const start = parseFloat(item.dataset.start);
         if (Number.isNaN(start)) return;
 
+        video.pause();
         video.currentTime = start;
-        video.play().catch(() => {});
 
         video.scrollIntoView({
             behavior: "smooth",

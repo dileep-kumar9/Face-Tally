@@ -640,6 +640,49 @@ def format_timestamp(seconds):
 # FACE ANALYSIS
 # ============================================================
 
+# Face *detection* cost scales with pixel count, but phone video/photos are
+# often 1080p+ while a detectable face rarely needs more than a few hundred
+# pixels across. Detecting on a downscaled copy and scaling the resulting
+# boxes back up (the same technique used in face_recognition's own example
+# scripts) cuts detection time substantially with negligible accuracy loss
+# for normally-framed faces. Encodings and thumbnails still use the
+# full-resolution frame, since those benefit from the extra detail.
+DETECTION_MAX_WIDTH = 640
+
+
+def _locate_faces_fast(rgb):
+
+    height, width = rgb.shape[:2]
+
+    if width <= DETECTION_MAX_WIDTH:
+        return face_recognition.face_locations(rgb)
+
+    scale = DETECTION_MAX_WIDTH / width
+
+    small = cv2.resize(
+        rgb,
+        (0, 0),
+        fx=scale,
+        fy=scale,
+    )
+
+    small_locations = face_recognition.face_locations(
+        small
+    )
+
+    inverse_scale = 1.0 / scale
+
+    return [
+        (
+            int(top * inverse_scale),
+            int(right * inverse_scale),
+            int(bottom * inverse_scale),
+            int(left * inverse_scale),
+        )
+        for (top, right, bottom, left) in small_locations
+    ]
+
+
 def analyze_frames(
     frames,
     known_encodings,
@@ -653,7 +696,7 @@ def analyze_frames(
 
     for timestamp, rgb in frames:
 
-        locations = face_recognition.face_locations(
+        locations = _locate_faces_fast(
             rgb
         )
 

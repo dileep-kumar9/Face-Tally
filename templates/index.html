@@ -312,18 +312,13 @@
 
                 </label>
 
-                <label class="file-btn">
-
+                <button
+                    type="button"
+                    class="file-btn camera-open-btn"
+                    id="known-camera-btn"
+                >
                     Use camera
-
-                    <input
-                        type="file"
-                        id="known-camera-input"
-                        accept="image/*"
-                        capture="user"
-                    >
-
-                </label>
+                </button>
 
             </div>
 
@@ -335,6 +330,42 @@
         </form>
 
     </details>
+
+
+    <!-- ============================================================
+         IN-PAGE CAMERA (for Known People)
+    ============================================================ -->
+
+    <div class="camera-modal" id="camera-modal" hidden>
+
+        <div class="camera-modal-inner">
+
+            <video
+                id="camera-preview"
+                autoplay
+                playsinline
+                muted
+            ></video>
+
+            <canvas id="camera-canvas" hidden></canvas>
+
+            <div class="camera-modal-status" id="camera-modal-status"></div>
+
+            <div class="camera-modal-actions">
+
+                <button type="button" class="btn-secondary" id="camera-cancel-btn">
+                    Cancel
+                </button>
+
+                <button type="button" id="camera-shoot-btn">
+                    Take photo
+                </button>
+
+            </div>
+
+        </div>
+
+    </div>
 
 
     {% if known_people %}
@@ -639,7 +670,7 @@
                                             data-start="{{ period.start }}"
                                             role="button"
                                             tabindex="0"
-                                            title="Play from {{ period.display }}"
+                                            title="Jump to {{ period.display }}"
                                             {% endif %}
                                         >
 

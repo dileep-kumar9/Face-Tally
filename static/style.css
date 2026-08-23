@@ -851,6 +851,140 @@ button.btn-secondary:hover {
 }
 
 
+.camera-open-btn {
+
+    cursor:
+        pointer;
+
+}
+
+
+.camera-modal {
+
+    position:
+        fixed;
+
+    inset:
+        0;
+
+    z-index:
+        1000;
+
+    background:
+        rgba(6, 7, 11, 0.92);
+
+    display:
+        flex;
+
+    align-items:
+        center;
+
+    justify-content:
+        center;
+
+    padding:
+        20px;
+
+}
+
+
+.camera-modal[hidden] {
+
+    display:
+        none;
+
+}
+
+
+.camera-modal-inner {
+
+    width:
+        100%;
+
+    max-width:
+        420px;
+
+    background:
+        var(--surface);
+
+    border:
+        1px solid
+        var(--border);
+
+    border-radius:
+        var(--radius);
+
+    padding:
+        16px;
+
+}
+
+
+#camera-preview {
+
+    width:
+        100%;
+
+    border-radius:
+        12px;
+
+    background:
+        #000;
+
+    display:
+        block;
+
+    aspect-ratio:
+        3 / 4;
+
+    object-fit:
+        cover;
+
+}
+
+
+.camera-modal-status {
+
+    font-size:
+        0.8rem;
+
+    color:
+        var(--text-muted);
+
+    margin-top:
+        10px;
+
+    min-height:
+        1em;
+
+}
+
+
+.camera-modal-actions {
+
+    display:
+        flex;
+
+    gap:
+        8px;
+
+    margin-top:
+        12px;
+
+}
+
+
+.camera-modal-actions button {
+
+    flex:
+        1;
+
+    width:
+        auto;
+
+}
+
+
 .chip-list {
 
     display:
