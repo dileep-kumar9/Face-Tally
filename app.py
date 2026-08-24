@@ -1916,10 +1916,14 @@ def download_youtube_video(
 ):
 
     if yt_dlp is None:
-
         raise RuntimeError(
             "yt-dlp is not installed on the server."
         )
+
+    os.makedirs(
+        dest_dir,
+        exist_ok=True,
+    )
 
     output_template = os.path.join(
         dest_dir,
@@ -1938,26 +1942,30 @@ def download_youtube_video(
             "best[ext=mp4][height<=720]/"
             "best"
         ),
+
         "outtmpl": output_template,
+
         "merge_output_format": "mp4",
+
         "noplaylist": True,
+
         "quiet": True,
         "no_warnings": True,
+
         "retries": 3,
         "fragment_retries": 3,
+
         "socket_timeout": 30,
+
         "max_filesize": MAX_DOWNLOAD_BYTES,
+
         "http_headers": DOWNLOAD_HEADERS,
+
         "ffmpeg_location": ffmpeg_path,
-        "extractor_args": {
-            "youtube": {
-                "player_client": [
-                    "tv",
-                    "web_safari",
-                    "android",
-                ]
-            }
-        },
+
+        # Let yt-dlp use its current YouTube
+        # client selection instead of forcing
+        # old TV / Safari / Android clients.
     }
 
     try:
@@ -2011,8 +2019,7 @@ def download_youtube_video(
             ):
 
                 candidate_paths.append(
-                    base_path
-                    + extension
+                    base_path + extension
                 )
 
             for candidate in candidate_paths:
@@ -2020,8 +2027,7 @@ def download_youtube_video(
                 if (
                     candidate
                     and os.path.exists(candidate)
-                    and os.path.getsize(candidate)
-                    > 0
+                    and os.path.getsize(candidate) > 0
                 ):
 
                     return candidate
@@ -2034,8 +2040,7 @@ def download_youtube_video(
 
                 if filename.lower().endswith(
                     tuple(
-                        "."
-                        + ext
+                        "." + ext
                         for ext in VIDEO_EXT
                     )
                 ):
@@ -2067,51 +2072,45 @@ def download_youtube_video(
         message = str(exc)
         message_lower = message.lower()
 
-        if "429" in message:
+        print(
+            "YouTube download failed:",
+            message,
+        )
 
+        if "429" in message:
             raise RuntimeError(
                 "YouTube temporarily rate-limited "
-                "the download. Please try again later."
+                "the server. Please try again later."
             ) from exc
 
-        if "not a bot" in message_lower:
-
+        if (
+            "not a bot" in message_lower
+            or "automated traffic" in message_lower
+            or "sign in to confirm" in message_lower
+            or "confirm you’re not a bot" in message_lower
+            or "confirm you're not a bot" in message_lower
+        ):
             raise RuntimeError(
-                "YouTube blocked this download as "
-                "automated traffic. Please try again "
-                "later or try another video."
+                "YouTube is blocking automated downloads "
+                "from this server. Try another video or "
+                "upload the video directly from your device."
             ) from exc
 
         if "private video" in message_lower:
-
             raise RuntimeError(
                 "This is a private YouTube video."
             ) from exc
 
-        if "confirm your age" in message_lower:
-
+        if (
+            "video unavailable" in message_lower
+            or "this video is unavailable" in message_lower
+        ):
             raise RuntimeError(
-                "This YouTube video is age-restricted "
-                "and cannot be downloaded by the server."
-            ) from exc
-
-        if "sign in" in message_lower:
-
-            raise RuntimeError(
-                "This YouTube video requires sign-in "
-                "and cannot be downloaded by the server."
-            ) from exc
-
-        if "not available" in message_lower:
-
-            raise RuntimeError(
-                "This YouTube video is unavailable "
-                "or restricted."
+                "This YouTube video is unavailable."
             ) from exc
 
         raise RuntimeError(
-            f"Unable to download the YouTube video: "
-            f"{message}"
+            f"Couldn't download the YouTube video: {message}"
         ) from exc
 
 
