@@ -12,3 +12,5 @@ gunicorn
 # YouTube / online video URL support
 yt-dlp>=2025.8.11
 firebase-admin>=7.5.0
+
+python-dotenv==1.2.3
