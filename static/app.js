@@ -2,6 +2,16 @@
     "use strict";
 
     // ============================================================
+    // AUTHENTICATION STATE
+    // ============================================================
+
+    const body = document.body;
+
+    window.FACETALLY_AUTHENTICATED =
+        body?.dataset?.authenticated === "true";
+
+
+    // ============================================================
     // ELEMENTS
     // ============================================================
 
@@ -12,9 +22,7 @@
         document.getElementById("media-input");
 
     const filenameEl =
-        document.getElementById(
-            "dropzone-filename"
-        );
+        document.getElementById("dropzone-filename");
 
     const urlInput =
         document.getElementById("media-url");
@@ -31,14 +39,12 @@
     // ============================================================
 
     function showSelectedFile(file) {
-
         if (!filenameEl || !file) {
             return;
         }
 
         const sizeMB =
-            file.size /
-            (1024 * 1024);
+            file.size / (1024 * 1024);
 
         filenameEl.textContent =
             `✓ ${file.name} · ${sizeMB.toFixed(2)} MB`;
@@ -46,7 +52,6 @@
 
 
     function clearSelectedFile() {
-
         if (filenameEl) {
             filenameEl.textContent = "";
         }
@@ -58,35 +63,25 @@
     // ============================================================
 
     if (mediaInput) {
-
         mediaInput.addEventListener(
             "change",
-            () => {
-
+            function () {
                 const file =
                     mediaInput.files &&
                     mediaInput.files[0];
 
                 if (!file) {
-
                     clearSelectedFile();
-
                     return;
                 }
 
                 showSelectedFile(file);
 
-
-                // Local file is the selected source,
-                // therefore clear URL.
-
                 if (urlInput) {
                     urlInput.value = "";
                 }
-
             }
         );
-
     }
 
 
@@ -95,26 +90,19 @@
     // ============================================================
 
     if (urlInput) {
-
         urlInput.addEventListener(
             "input",
-            () => {
-
-                if (
-                    urlInput.value.trim()
-                ) {
+            function () {
+                if (urlInput.value.trim()) {
 
                     if (mediaInput) {
                         mediaInput.value = "";
                     }
 
                     clearSelectedFile();
-
                 }
-
             }
         );
-
     }
 
 
@@ -122,11 +110,8 @@
     // DRAG ENTER / DRAG OVER
     // ============================================================
 
-    [
-        "dragenter",
-        "dragover"
-    ].forEach(
-        (eventName) => {
+    ["dragenter", "dragover"].forEach(
+        function (eventName) {
 
             if (!dropzone) {
                 return;
@@ -134,7 +119,7 @@
 
             dropzone.addEventListener(
                 eventName,
-                (event) => {
+                function (event) {
 
                     event.preventDefault();
                     event.stopPropagation();
@@ -142,10 +127,8 @@
                     dropzone.classList.add(
                         "drag-over"
                     );
-
                 }
             );
-
         }
     );
 
@@ -154,11 +137,8 @@
     // DRAG LEAVE / DROP
     // ============================================================
 
-    [
-        "dragleave",
-        "drop"
-    ].forEach(
-        (eventName) => {
+    ["dragleave", "drop"].forEach(
+        function (eventName) {
 
             if (!dropzone) {
                 return;
@@ -166,7 +146,7 @@
 
             dropzone.addEventListener(
                 eventName,
-                (event) => {
+                function (event) {
 
                     event.preventDefault();
                     event.stopPropagation();
@@ -174,10 +154,8 @@
                     dropzone.classList.remove(
                         "drag-over"
                     );
-
                 }
             );
-
         }
     );
 
@@ -187,52 +165,37 @@
     // ============================================================
 
     if (dropzone) {
-
         dropzone.addEventListener(
             "drop",
-            (event) => {
+            function (event) {
 
                 const files =
                     event.dataTransfer &&
                     event.dataTransfer.files;
 
                 const file =
-                    files &&
-                    files[0];
+                    files && files[0];
 
-                if (
-                    !file ||
-                    !mediaInput
-                ) {
+                if (!file || !mediaInput) {
                     return;
                 }
 
-
                 try {
-
-                    mediaInput.files =
-                        files;
-
+                    mediaInput.files = files;
                 } catch (error) {
-
                     console.warn(
                         "Could not assign dropped files:",
                         error
                     );
-
                 }
 
-
                 showSelectedFile(file);
-
 
                 if (urlInput) {
                     urlInput.value = "";
                 }
-
             }
         );
-
     }
 
 
@@ -253,10 +216,9 @@
                 ".file-btn"
             );
 
-
         knownPhotoInput.addEventListener(
             "change",
-            () => {
+            function () {
 
                 const file =
                     knownPhotoInput.files &&
@@ -266,289 +228,1414 @@
                     return;
                 }
 
-
                 if (fileButton) {
 
                     fileButton.classList.add(
                         "file-selected"
                     );
 
-
                     const textNode =
                         Array.from(
                             fileButton.childNodes
                         ).find(
-                            (node) =>
-                                node.nodeType ===
+                            function (node) {
+                                return (
+                                    node.nodeType ===
                                     Node.TEXT_NODE &&
-                                node.textContent.trim()
+                                    node.textContent.trim()
+                                );
+                            }
                         );
 
-
                     if (textNode) {
-
                         textNode.textContent =
                             `✓ ${file.name} `;
-
                     }
-
                 }
-
             }
         );
-
     }
 
 
     // ============================================================
-    // IN-PAGE CAMERA / RECORDER (shared by Known People + Upload)
+    // CAMERA / RECORDER
     // ============================================================
-    // The HTML `capture` attribute on a file input is only a hint, and
-    // is documented as inconsistent across Android versions/browsers -
-    // sometimes it opens the camera app directly, sometimes it silently
-    // falls back to the plain file picker with no way to tell which will
-    // happen ahead of time. Using getUserMedia() instead gives a camera
-    // view fully under this page's own control, which doesn't depend on
-    // the OS file-picker/camera-app handoff working correctly at all.
-    //
-    // One modal serves four buttons:
-    //   known-camera-btn  -> photo,  target = known-photo-input
-    //   known-record-btn  -> video,  target = known-photo-input, auto-stops
-    //                         after a few seconds (picking a good reference
-    //                         frame server-side doesn't need a long clip)
-    //   media-camera-btn  -> photo,  target = media-input
-    //   media-record-btn  -> video,  target = media-input, manual start/stop
-    //                         (an analysis recording can be any length)
 
-    const cameraModal = document.getElementById("camera-modal");
-    const cameraPreview = document.getElementById("camera-preview");
-    const cameraCanvas = document.getElementById("camera-canvas");
-    const cameraShootBtn = document.getElementById("camera-shoot-btn");
-    const cameraRecordBtn = document.getElementById("camera-record-btn");
-    const cameraCancelBtn = document.getElementById("camera-cancel-btn");
-    const cameraStatus = document.getElementById("camera-modal-status");
-    const cameraTimer = document.getElementById("camera-modal-timer");
+    const cameraModal =
+        document.getElementById("camera-modal");
+
+    const cameraPreview =
+        document.getElementById("camera-preview");
+
+    const cameraCanvas =
+        document.getElementById("camera-canvas");
+
+    const cameraShootBtn =
+        document.getElementById("camera-shoot-btn");
+
+    const cameraRecordBtn =
+        document.getElementById("camera-record-btn");
+
+    const cameraCancelBtn =
+        document.getElementById("camera-cancel-btn");
+
+    const cameraStatus =
+        document.getElementById("camera-modal-status");
+
+    const cameraTimer =
+        document.getElementById("camera-modal-timer");
+
 
     let cameraStream = null;
     let mediaRecorder = null;
     let recordedChunks = [];
+
     let recordTimerInterval = null;
     let recordElapsedSeconds = 0;
+
     let cameraTargetInput = null;
     let cameraMode = "photo";
     let cameraAutoStopSeconds = null;
 
+
     function stopCameraStream() {
+
         if (cameraStream) {
-            cameraStream.getTracks().forEach((track) => track.stop());
+
+            cameraStream
+                .getTracks()
+                .forEach(function (track) {
+                    track.stop();
+                });
+
             cameraStream = null;
         }
-        if (cameraPreview) cameraPreview.srcObject = null;
+
+        if (cameraPreview) {
+            cameraPreview.srcObject = null;
+        }
     }
 
+
     function pickSupportedRecordingMimeType() {
+
         const candidates = [
             "video/mp4",
             "video/webm;codecs=vp9",
             "video/webm;codecs=vp8",
-            "video/webm",
+            "video/webm"
         ];
-        if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return "";
-        for (const type of candidates) {
-            if (MediaRecorder.isTypeSupported(type)) return type;
+
+        if (
+            !window.MediaRecorder ||
+            !MediaRecorder.isTypeSupported
+        ) {
+            return "";
         }
+
+        for (const type of candidates) {
+
+            if (
+                MediaRecorder.isTypeSupported(type)
+            ) {
+                return type;
+            }
+        }
+
         return "";
     }
 
+
     function formatElapsed(totalSeconds) {
-        const m = Math.floor(totalSeconds / 60);
-        const s = totalSeconds % 60;
-        return `${m}:${String(s).padStart(2, "0")}`;
+
+        const minutes =
+            Math.floor(totalSeconds / 60);
+
+        const seconds =
+            totalSeconds % 60;
+
+        return (
+            `${minutes}:` +
+            String(seconds).padStart(2, "0")
+        );
     }
 
-    function resetCameraUI() {
-        if (cameraShootBtn) cameraShootBtn.hidden = cameraMode !== "photo";
 
-        const isAutoRecord = cameraMode === "video" && cameraAutoStopSeconds;
-        if (cameraRecordBtn) {
-            cameraRecordBtn.hidden = cameraMode !== "video" || !!isAutoRecord;
-            cameraRecordBtn.textContent = "Start recording";
-            cameraRecordBtn.classList.remove("recording");
+    function resetCameraUI() {
+
+        if (cameraShootBtn) {
+            cameraShootBtn.hidden =
+                cameraMode !== "photo";
         }
-        if (cameraTimer) cameraTimer.textContent = "";
+
+        const isAutoRecord =
+            cameraMode === "video" &&
+            Boolean(cameraAutoStopSeconds);
+
+        if (cameraRecordBtn) {
+
+            cameraRecordBtn.hidden =
+                cameraMode !== "video" ||
+                isAutoRecord;
+
+            cameraRecordBtn.textContent =
+                "Start recording";
+
+            cameraRecordBtn.classList.remove(
+                "recording"
+            );
+        }
+
+        if (cameraTimer) {
+            cameraTimer.textContent = "";
+        }
 
         clearInterval(recordTimerInterval);
+
         recordTimerInterval = null;
         recordElapsedSeconds = 0;
     }
 
+
     function closeCameraModal() {
-        if (mediaRecorder && mediaRecorder.state !== "inactive") {
-            mediaRecorder.stop();
+
+        if (
+            mediaRecorder &&
+            mediaRecorder.state !== "inactive"
+        ) {
+            try {
+                mediaRecorder.stop();
+            } catch (error) {
+                console.warn(
+                    "Could not stop recorder:",
+                    error
+                );
+            }
         }
+
+        mediaRecorder = null;
+
         stopCameraStream();
-        if (cameraModal) cameraModal.hidden = true;
-        if (cameraStatus) cameraStatus.textContent = "";
+
+        if (cameraModal) {
+            cameraModal.hidden = true;
+        }
+
+        if (cameraStatus) {
+            cameraStatus.textContent = "";
+        }
+
         resetCameraUI();
     }
 
+
     function funnelFileInto(input, file) {
-        if (!input || !file) return;
-        const dataTransfer = new DataTransfer();
-        dataTransfer.items.add(file);
-        input.files = dataTransfer.files;
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-    }
 
-    function takePhoto() {
-        if (!cameraPreview || !cameraPreview.videoWidth || !cameraTargetInput) return;
-
-        cameraCanvas.width = cameraPreview.videoWidth;
-        cameraCanvas.height = cameraPreview.videoHeight;
-        cameraCanvas.getContext("2d").drawImage(cameraPreview, 0, 0);
-
-        cameraCanvas.toBlob((blob) => {
-            if (!blob) return;
-            funnelFileInto(
-                cameraTargetInput,
-                new File([blob], "camera-photo.jpg", { type: "image/jpeg" })
-            );
-            closeCameraModal();
-        }, "image/jpeg", 0.9);
-    }
-
-    function startRecording() {
-        if (!cameraStream || !cameraTargetInput) return;
-
-        recordedChunks = [];
-        const mimeType = pickSupportedRecordingMimeType();
-
-        try {
-            mediaRecorder = mimeType
-                ? new MediaRecorder(cameraStream, { mimeType })
-                : new MediaRecorder(cameraStream);
-        } catch (error) {
-            if (cameraStatus) cameraStatus.textContent = "Recording isn't supported in this browser.";
+        if (!input || !file) {
             return;
         }
 
-        mediaRecorder.ondataavailable = (event) => {
-            if (event.data && event.data.size > 0) recordedChunks.push(event.data);
-        };
+        try {
 
-        mediaRecorder.onstop = () => {
-            const type = mediaRecorder.mimeType || "video/webm";
-            const blob = new Blob(recordedChunks, { type });
-            const ext = type.includes("mp4") ? "mp4" : "webm";
-            funnelFileInto(
-                cameraTargetInput,
-                new File([blob], `camera-recording.${ext}`, { type })
+            const dataTransfer =
+                new DataTransfer();
+
+            dataTransfer.items.add(file);
+
+            input.files =
+                dataTransfer.files;
+
+            input.dispatchEvent(
+                new Event(
+                    "change",
+                    { bubbles: true }
+                )
             );
-            closeCameraModal();
-        };
+
+        } catch (error) {
+
+            console.error(
+                "Could not place camera file into input:",
+                error
+            );
+        }
+    }
+
+
+    function takePhoto() {
+
+        if (
+            !cameraPreview ||
+            !cameraCanvas ||
+            !cameraPreview.videoWidth ||
+            !cameraTargetInput
+        ) {
+            return;
+        }
+
+        cameraCanvas.width =
+            cameraPreview.videoWidth;
+
+        cameraCanvas.height =
+            cameraPreview.videoHeight;
+
+        const context =
+            cameraCanvas.getContext("2d");
+
+        if (!context) {
+            return;
+        }
+
+        context.drawImage(
+            cameraPreview,
+            0,
+            0,
+            cameraCanvas.width,
+            cameraCanvas.height
+        );
+
+        cameraCanvas.toBlob(
+            function (blob) {
+
+                if (!blob) {
+                    return;
+                }
+
+                const file =
+                    new File(
+                        [blob],
+                        "camera-photo.jpg",
+                        {
+                            type: "image/jpeg"
+                        }
+                    );
+
+                funnelFileInto(
+                    cameraTargetInput,
+                    file
+                );
+
+                closeCameraModal();
+            },
+            "image/jpeg",
+            0.9
+        );
+    }
+
+
+    function startRecording() {
+
+        if (
+            !cameraStream ||
+            !cameraTargetInput
+        ) {
+            return;
+        }
+
+        if (!window.MediaRecorder) {
+
+            if (cameraStatus) {
+                cameraStatus.textContent =
+                    "Recording isn't supported in this browser.";
+            }
+
+            return;
+        }
+
+        recordedChunks = [];
+
+        const mimeType =
+            pickSupportedRecordingMimeType();
+
+        try {
+
+            mediaRecorder =
+                mimeType
+                    ? new MediaRecorder(
+                        cameraStream,
+                        { mimeType: mimeType }
+                    )
+                    : new MediaRecorder(
+                        cameraStream
+                    );
+
+        } catch (error) {
+
+            console.error(error);
+
+            if (cameraStatus) {
+                cameraStatus.textContent =
+                    "Recording isn't supported in this browser.";
+            }
+
+            return;
+        }
+
+
+        mediaRecorder.ondataavailable =
+            function (event) {
+
+                if (
+                    event.data &&
+                    event.data.size > 0
+                ) {
+                    recordedChunks.push(
+                        event.data
+                    );
+                }
+            };
+
+
+        mediaRecorder.onstop =
+            function () {
+
+                const type =
+                    mediaRecorder.mimeType ||
+                    mimeType ||
+                    "video/webm";
+
+                const blob =
+                    new Blob(
+                        recordedChunks,
+                        { type: type }
+                    );
+
+                const extension =
+                    type.includes("mp4")
+                        ? "mp4"
+                        : "webm";
+
+                const file =
+                    new File(
+                        [blob],
+                        `camera-recording.${extension}`,
+                        { type: type }
+                    );
+
+                funnelFileInto(
+                    cameraTargetInput,
+                    file
+                );
+
+                mediaRecorder = null;
+
+                closeCameraModal();
+            };
+
 
         mediaRecorder.start();
 
+
         if (cameraRecordBtn) {
-            cameraRecordBtn.textContent = "Stop recording";
-            cameraRecordBtn.classList.add("recording");
+
+            cameraRecordBtn.textContent =
+                "Stop recording";
+
+            cameraRecordBtn.classList.add(
+                "recording"
+            );
         }
+
 
         recordElapsedSeconds = 0;
-        if (cameraTimer) cameraTimer.textContent = formatElapsed(0);
 
-        recordTimerInterval = setInterval(() => {
-            recordElapsedSeconds += 1;
-            if (cameraTimer) cameraTimer.textContent = formatElapsed(recordElapsedSeconds);
-            if (cameraAutoStopSeconds && recordElapsedSeconds >= cameraAutoStopSeconds) {
-                stopRecording();
-            }
-        }, 1000);
+        if (cameraTimer) {
+            cameraTimer.textContent =
+                formatElapsed(0);
+        }
+
+
+        clearInterval(
+            recordTimerInterval
+        );
+
+        recordTimerInterval =
+            setInterval(
+                function () {
+
+                    recordElapsedSeconds += 1;
+
+                    if (cameraTimer) {
+                        cameraTimer.textContent =
+                            formatElapsed(
+                                recordElapsedSeconds
+                            );
+                    }
+
+                    if (
+                        cameraAutoStopSeconds &&
+                        recordElapsedSeconds >=
+                        cameraAutoStopSeconds
+                    ) {
+                        stopRecording();
+                    }
+
+                },
+                1000
+            );
     }
+
 
     function stopRecording() {
-        if (mediaRecorder && mediaRecorder.state !== "inactive") {
-            mediaRecorder.stop();
-        }
-        clearInterval(recordTimerInterval);
+
+        clearInterval(
+            recordTimerInterval
+        );
+
         recordTimerInterval = null;
+
+        if (
+            mediaRecorder &&
+            mediaRecorder.state !== "inactive"
+        ) {
+            try {
+                mediaRecorder.stop();
+            } catch (error) {
+                console.warn(
+                    "Could not stop recording:",
+                    error
+                );
+            }
+        }
     }
 
+
     function toggleRecording() {
-        if (mediaRecorder && mediaRecorder.state === "recording") {
+
+        if (
+            mediaRecorder &&
+            mediaRecorder.state === "recording"
+        ) {
             stopRecording();
         } else {
             startRecording();
         }
     }
 
-    async function openCamera(targetInput, mode, autoStopSeconds) {
-        if (!cameraModal || !cameraPreview || !targetInput) return;
 
-        cameraTargetInput = targetInput;
-        cameraMode = mode;
-        cameraAutoStopSeconds = autoStopSeconds || null;
+    async function openCamera(
+        targetInput,
+        mode,
+        autoStopSeconds
+    ) {
+
+        if (
+            !cameraModal ||
+            !cameraPreview ||
+            !targetInput
+        ) {
+            return;
+        }
+
+        cameraTargetInput =
+            targetInput;
+
+        cameraMode =
+            mode;
+
+        cameraAutoStopSeconds =
+            autoStopSeconds || null;
+
         resetCameraUI();
+
         cameraModal.hidden = false;
 
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+
+        if (
+            !navigator.mediaDevices ||
+            !navigator.mediaDevices.getUserMedia
+        ) {
+
             if (cameraStatus) {
                 cameraStatus.textContent =
                     "Camera access isn't available in this browser. " +
                     "Use the file picker instead.";
             }
+
             return;
         }
 
-        if (cameraStatus) cameraStatus.textContent = "Requesting camera access\u2026";
+
+        if (cameraStatus) {
+            cameraStatus.textContent =
+                "Requesting camera access…";
+        }
+
 
         try {
-            cameraStream = await navigator.mediaDevices.getUserMedia({
-                video: { facingMode: "user" },
-                audio: mode === "video",
-            });
-            cameraPreview.srcObject = cameraStream;
-            if (cameraStatus) cameraStatus.textContent = "";
 
-            if (mode === "video" && cameraAutoStopSeconds) {
+            cameraStream =
+                await navigator.mediaDevices.getUserMedia(
+                    {
+                        video: {
+                            facingMode: "user"
+                        },
+                        audio:
+                            mode === "video"
+                    }
+                );
+
+
+            cameraPreview.srcObject =
+                cameraStream;
+
+
+            if (cameraStatus) {
+                cameraStatus.textContent = "";
+            }
+
+
+            if (
+                mode === "video" &&
+                cameraAutoStopSeconds
+            ) {
                 startRecording();
             }
+
         } catch (error) {
+
+            console.error(
+                "Camera error:",
+                error
+            );
+
             if (cameraStatus) {
                 cameraStatus.textContent =
-                    "Couldn't access the camera (permission denied, or " +
-                    "none available). Use the file picker instead.";
+                    "Couldn't access the camera " +
+                    "(permission denied, or none available). " +
+                    "Use the file picker instead.";
             }
         }
     }
 
-    if (cameraShootBtn) cameraShootBtn.addEventListener("click", takePhoto);
-    if (cameraRecordBtn) cameraRecordBtn.addEventListener("click", toggleRecording);
-    if (cameraCancelBtn) cameraCancelBtn.addEventListener("click", closeCameraModal);
 
-    // Never leave the camera light on if the user navigates away mid-capture.
-    window.addEventListener("beforeunload", stopCameraStream);
+    if (cameraShootBtn) {
+        cameraShootBtn.addEventListener(
+            "click",
+            takePhoto
+        );
+    }
 
-    const knownCameraBtn = document.getElementById("known-camera-btn");
-    const knownRecordBtn = document.getElementById("known-record-btn");
-    const mediaCameraBtn = document.getElementById("media-camera-btn");
-    const mediaRecordBtn = document.getElementById("media-record-btn");
 
-    if (knownCameraBtn && knownPhotoInput) {
-        knownCameraBtn.addEventListener("click", () => openCamera(knownPhotoInput, "photo"));
+    if (cameraRecordBtn) {
+        cameraRecordBtn.addEventListener(
+            "click",
+            toggleRecording
+        );
     }
-    if (knownRecordBtn && knownPhotoInput) {
-        // Fixed short auto-clip: enough for the server to pick one clean
-        // frame, without needing a manual stop button for this use case.
-        knownRecordBtn.addEventListener("click", () => openCamera(knownPhotoInput, "video", 4));
+
+
+    if (cameraCancelBtn) {
+        cameraCancelBtn.addEventListener(
+            "click",
+            closeCameraModal
+        );
     }
-    if (mediaCameraBtn && mediaInput) {
-        mediaCameraBtn.addEventListener("click", () => openCamera(mediaInput, "photo"));
+
+
+    window.addEventListener(
+        "beforeunload",
+        stopCameraStream
+    );
+
+
+    const knownCameraBtn =
+        document.getElementById(
+            "known-camera-btn"
+        );
+
+    const knownRecordBtn =
+        document.getElementById(
+            "known-record-btn"
+        );
+
+    const mediaCameraBtn =
+        document.getElementById(
+            "media-camera-btn"
+        );
+
+    const mediaRecordBtn =
+        document.getElementById(
+            "media-record-btn"
+        );
+
+
+    if (
+        knownCameraBtn &&
+        knownPhotoInput
+    ) {
+
+        knownCameraBtn.addEventListener(
+            "click",
+            function () {
+                openCamera(
+                    knownPhotoInput,
+                    "photo"
+                );
+            }
+        );
     }
-    if (mediaRecordBtn && mediaInput) {
-        // Manual start/stop: a recording meant for analysis can be any length.
-        mediaRecordBtn.addEventListener("click", () => openCamera(mediaInput, "video"));
+
+
+    if (
+        knownRecordBtn &&
+        knownPhotoInput
+    ) {
+
+        knownRecordBtn.addEventListener(
+            "click",
+            function () {
+
+                openCamera(
+                    knownPhotoInput,
+                    "video",
+                    4
+                );
+
+            }
+        );
     }
+
+
+    if (
+        mediaCameraBtn &&
+        mediaInput
+    ) {
+
+        mediaCameraBtn.addEventListener(
+            "click",
+            function () {
+
+                openCamera(
+                    mediaInput,
+                    "photo"
+                );
+
+            }
+        );
+    }
+
+
+    if (
+        mediaRecordBtn &&
+        mediaInput
+    ) {
+
+        mediaRecordBtn.addEventListener(
+            "click",
+            function () {
+
+                openCamera(
+                    mediaInput,
+                    "video"
+                );
+
+            }
+        );
+    }
+
+
+    // ============================================================
+    // GUEST FACE STORAGE
+    // ============================================================
+
+    const GUEST_DB_NAME =
+        "facetally_guest_faces";
+
+    const GUEST_STORE =
+        "faces";
+
+
+    function guestDb() {
+
+        return new Promise(
+            function (resolve, reject) {
+
+                const request =
+                    indexedDB.open(
+                        GUEST_DB_NAME,
+                        1
+                    );
+
+
+                request.onupgradeneeded =
+                    function () {
+
+                        const db =
+                            request.result;
+
+                        if (
+                            !db.objectStoreNames.contains(
+                                GUEST_STORE
+                            )
+                        ) {
+
+                            db.createObjectStore(
+                                GUEST_STORE,
+                                {
+                                    keyPath: "id",
+                                    autoIncrement: true
+                                }
+                            );
+                        }
+                    };
+
+
+                request.onsuccess =
+                    function () {
+                        resolve(
+                            request.result
+                        );
+                    };
+
+
+                request.onerror =
+                    function () {
+                        reject(
+                            request.error
+                        );
+                    };
+            }
+        );
+    }
+
+
+    async function getGuestFaces() {
+
+        const db =
+            await guestDb();
+
+        return new Promise(
+            function (resolve, reject) {
+
+                const transaction =
+                    db.transaction(
+                        GUEST_STORE,
+                        "readonly"
+                    );
+
+                const request =
+                    transaction
+                        .objectStore(GUEST_STORE)
+                        .getAll();
+
+
+                request.onsuccess =
+                    function () {
+                        resolve(
+                            request.result || []
+                        );
+                    };
+
+
+                request.onerror =
+                    function () {
+                        reject(
+                            request.error
+                        );
+                    };
+            }
+        );
+    }
+
+
+    async function putGuestFace(face) {
+
+        const db =
+            await guestDb();
+
+        return new Promise(
+            function (resolve, reject) {
+
+                const transaction =
+                    db.transaction(
+                        GUEST_STORE,
+                        "readwrite"
+                    );
+
+                const request =
+                    transaction
+                        .objectStore(GUEST_STORE)
+                        .put(face);
+
+
+                request.onsuccess =
+                    function () {
+                        resolve(
+                            request.result
+                        );
+                    };
+
+
+                request.onerror =
+                    function () {
+                        reject(
+                            request.error
+                        );
+                    };
+            }
+        );
+    }
+
+
+    async function deleteGuestFace(id) {
+
+        const db =
+            await guestDb();
+
+        return new Promise(
+            function (resolve, reject) {
+
+                const transaction =
+                    db.transaction(
+                        GUEST_STORE,
+                        "readwrite"
+                    );
+
+                const request =
+                    transaction
+                        .objectStore(GUEST_STORE)
+                        .delete(id);
+
+
+                request.onsuccess =
+                    function () {
+                        resolve();
+                    };
+
+
+                request.onerror =
+                    function () {
+                        reject(
+                            request.error
+                        );
+                    };
+            }
+        );
+    }
+
+
+    function guestAvatarUrl(blob) {
+        return URL.createObjectURL(blob);
+    }
+
+
+    async function renderGuestKnownPeople() {
+
+        const list =
+            document.getElementById(
+                "guest-known-list"
+            );
+
+        const summary =
+            document.getElementById(
+                "known-people-summary"
+            );
+
+
+        if (
+            !list ||
+            window.FACETALLY_AUTHENTICATED
+        ) {
+            return;
+        }
+
+
+        let faces = [];
+
+        try {
+            faces =
+                await getGuestFaces();
+        } catch (error) {
+            console.warn(
+                "Could not read guest faces:",
+                error
+            );
+            return;
+        }
+
+
+        list.innerHTML = "";
+
+        list.hidden =
+            faces.length === 0;
+
+
+        if (summary) {
+
+            summary.textContent =
+                `${faces.length} saved on this device — add or remove`;
+        }
+
+
+        for (const face of faces) {
+
+            const chip =
+                document.createElement("div");
+
+            chip.className =
+                "chip";
+
+
+            const img =
+                document.createElement("img");
+
+            img.className =
+                "chip-avatar";
+
+            img.alt = "";
+
+            img.src =
+                guestAvatarUrl(face.blob);
+
+
+            const name =
+                document.createTextNode(
+                    face.name
+                );
+
+
+            const remove =
+                document.createElement("button");
+
+            remove.type =
+                "button";
+
+            remove.title =
+                "Remove";
+
+            remove.textContent =
+                "×";
+
+            remove.dataset.guestFaceId =
+                String(face.id);
+
+
+            chip.append(
+                img,
+                name,
+                remove
+            );
+
+
+            list.appendChild(chip);
+        }
+    }
+
+
+    async function dataUrlToBlob(dataUrl) {
+
+        const response =
+            await fetch(dataUrl);
+
+        return response.blob();
+    }
+
+
+    async function importGuestFaces() {
+
+        if (
+            !window.FACETALLY_AUTHENTICATED
+        ) {
+            return;
+        }
+
+
+        const faces =
+            await getGuestFaces();
+
+
+        if (!faces.length) {
+            return;
+        }
+
+
+        const modal =
+            document.getElementById(
+                "guest-import-modal"
+            );
+
+        const status =
+            document.getElementById(
+                "guest-import-status"
+            );
+
+        const importButton =
+            document.getElementById(
+                "guest-import-btn"
+            );
+
+        const skipButton =
+            document.getElementById(
+                "guest-import-skip"
+            );
+
+        const countText =
+            document.getElementById(
+                "guest-import-count"
+            );
+
+
+        if (
+            !modal ||
+            !importButton ||
+            !skipButton
+        ) {
+            return;
+        }
+
+
+        countText.textContent =
+            `You have ${faces.length} temporary saved face` +
+            `${faces.length === 1 ? "" : "s"} on this device.`;
+
+
+        modal.hidden = false;
+
+
+        skipButton.onclick =
+            function () {
+                modal.hidden = true;
+            };
+
+
+        importButton.onclick =
+            async function () {
+
+                importButton.disabled =
+                    true;
+
+                skipButton.disabled =
+                    true;
+
+
+                if (status) {
+
+                    status.hidden =
+                        false;
+
+                    status.className =
+                        "auth-status info";
+
+                    status.textContent =
+                        "Importing…";
+                }
+
+
+                try {
+
+                    const formData =
+                        new FormData();
+
+
+                    for (const face of faces) {
+
+                        formData.append(
+                            "photos",
+                            face.blob,
+                            face.filename ||
+                            `${face.name}.jpg`
+                        );
+
+                        formData.append(
+                            "names",
+                            face.name
+                        );
+                    }
+
+
+                    const response =
+                        await fetch(
+                            "/import_known",
+                            {
+                                method: "POST",
+                                body: formData,
+                                credentials: "same-origin"
+                            }
+                        );
+
+
+                    const data =
+                        await response
+                            .json()
+                            .catch(
+                                function () {
+                                    return {};
+                                }
+                            );
+
+
+                    if (
+                        !response.ok ||
+                        !data.ok
+                    ) {
+                        throw new Error(
+                            data.error ||
+                            "Import failed."
+                        );
+                    }
+
+
+                    const imported =
+                        new Set(
+                            data.imported || []
+                        );
+
+
+                    for (
+                        const face of faces
+                    ) {
+
+                        if (
+                            imported.has(
+                                face.name
+                            )
+                        ) {
+
+                            await deleteGuestFace(
+                                face.id
+                            );
+                        }
+                    }
+
+
+                    modal.hidden =
+                        true;
+
+                    window.location.reload();
+
+                } catch (error) {
+
+                    if (status) {
+
+                        status.hidden =
+                            false;
+
+                        status.className =
+                            "auth-status error";
+
+                        status.textContent =
+                            error.message ||
+                            "Import failed. Try again.";
+                    }
+
+
+                    importButton.disabled =
+                        false;
+
+                    skipButton.disabled =
+                        false;
+                }
+            };
+    }
+
+
+    // ============================================================
+    // GUEST ADD
+    // ============================================================
+
+    const addKnownForm =
+        document.querySelector(
+            ".add-known-form"
+        );
+
+
+    if (
+        addKnownForm &&
+        !window.FACETALLY_AUTHENTICATED
+    ) {
+
+        addKnownForm.addEventListener(
+            "submit",
+            async function (event) {
+
+                event.preventDefault();
+
+
+                const nameInput =
+                    addKnownForm.querySelector(
+                        'input[name="name"]'
+                    );
+
+                const photoInput =
+                    addKnownForm.querySelector(
+                        'input[name="photo"]'
+                    );
+
+
+                const name =
+                    nameInput?.value.trim() || "";
+
+                const file =
+                    photoInput?.files?.[0];
+
+
+                if (!name || !file) {
+                    return;
+                }
+
+
+                if (
+                    file.type &&
+                    !file.type.startsWith("image/")
+                ) {
+
+                    alert(
+                        "For guest saved faces, please choose or take a photo."
+                    );
+
+                    return;
+                }
+
+
+                try {
+
+                    await putGuestFace(
+                        {
+                            name: name,
+                            filename:
+                                file.name ||
+                                `${name}.jpg`,
+                            type:
+                                file.type ||
+                                "image/jpeg",
+                            blob: file,
+                            createdAt:
+                                Date.now()
+                        }
+                    );
+
+
+                    nameInput.value =
+                        "";
+
+                    photoInput.value =
+                        "";
+
+
+                    addKnownForm
+                        .querySelectorAll(
+                            ".file-selected"
+                        )
+                        .forEach(
+                            function (element) {
+                                element.classList.remove(
+                                    "file-selected"
+                                );
+                            }
+                        );
+
+
+                    await renderGuestKnownPeople();
+
+                } catch (error) {
+
+                    console.error(
+                        "Could not save guest face:",
+                        error
+                    );
+
+                    alert(
+                        "Could not save this face on the device."
+                    );
+                }
+            }
+        );
+    }
+
+
+    // ============================================================
+    // GUEST REMOVE
+    // ============================================================
+
+    const guestKnownList =
+        document.getElementById(
+            "guest-known-list"
+        );
+
+
+    if (guestKnownList) {
+
+        guestKnownList.addEventListener(
+            "click",
+            async function (event) {
+
+                const button =
+                    event.target.closest(
+                        "button[data-guest-face-id]"
+                    );
+
+                if (!button) {
+                    return;
+                }
+
+
+                try {
+
+                    await deleteGuestFace(
+                        Number(
+                            button.dataset.guestFaceId
+                        )
+                    );
+
+                    await renderGuestKnownPeople();
+
+                } catch (error) {
+
+                    console.error(
+                        "Could not delete guest face:",
+                        error
+                    );
+                }
+            }
+        );
+    }
+
+
+    if (
+        !window.FACETALLY_AUTHENTICATED
+    ) {
+
+        renderGuestKnownPeople()
+            .catch(console.warn);
+    }
+
+
+    // ============================================================
+    // AUTH STATE CHANGE
+    // ============================================================
+
+    window.addEventListener(
+        "facetally-auth-state",
+        async function (event) {
+
+            const user =
+                event.detail?.user;
+
+
+            if (
+                user &&
+                !user.isAnonymous
+            ) {
+
+                window.FACETALLY_AUTHENTICATED =
+                    true;
+
+
+                try {
+
+                    await importGuestFaces();
+
+                } catch (error) {
+
+                    console.warn(
+                        "Guest face import failed:",
+                        error
+                    );
+                }
+            }
+        }
+    );
 
 
     // ============================================================
@@ -559,7 +1646,7 @@
 
         form.addEventListener(
             "submit",
-            (event) => {
+            async function (event) {
 
                 const hasFile =
                     mediaInput &&
@@ -572,15 +1659,15 @@
                     urlInput.value.trim().length > 0;
 
 
-                if (
-                    !hasFile &&
-                    !hasUrl
-                ) {
+                if (!hasFile && !hasUrl) {
 
                     event.preventDefault();
 
-                    return;
+                    alert(
+                        "Please choose a photo/video or enter a URL."
+                    );
 
+                    return;
                 }
 
 
@@ -589,13 +1676,109 @@
                     analyzeBtn.textContent =
                         "⏳ Analyzing…";
 
-                    analyzeBtn.disabled = true;
-
+                    analyzeBtn.disabled =
+                        true;
                 }
 
+
+                // Logged-in users use the normal form submission.
+                if (
+                    window.FACETALLY_AUTHENTICATED
+                ) {
+                    return;
+                }
+
+
+                // ====================================================
+                // GUEST ANALYSIS
+                // ====================================================
+
+                event.preventDefault();
+
+
+                try {
+
+                    const faces =
+                        await getGuestFaces();
+
+
+                    const body =
+                        new FormData(form);
+
+
+                    // Guest faces are attached only to this request.
+                    for (
+                        const face of faces
+                    ) {
+
+                        body.append(
+                            "guest_known",
+                            face.blob,
+                            face.filename ||
+                            `${face.name}.jpg`
+                        );
+
+                        body.append(
+                            "guest_name",
+                            face.name
+                        );
+                    }
+
+
+                    const response =
+                        await fetch(
+                            form.action,
+                            {
+                                method: "POST",
+                                body: body,
+                                credentials: "same-origin"
+                            }
+                        );
+
+
+                    const html =
+                        await response.text();
+
+
+                    if (!response.ok) {
+                        throw new Error(
+                            "Analysis request failed."
+                        );
+                    }
+
+
+                    document.open();
+
+                    document.write(
+                        html
+                    );
+
+                    document.close();
+
+                } catch (error) {
+
+                    console.error(
+                        "Guest analysis error:",
+                        error
+                    );
+
+
+                    if (analyzeBtn) {
+
+                        analyzeBtn.textContent =
+                            "Analyze";
+
+                        analyzeBtn.disabled =
+                            false;
+                    }
+
+
+                    alert(
+                        "Analysis failed. Please try again."
+                    );
+                }
             }
         );
-
     }
 
 
@@ -609,178 +1792,488 @@
 
         window.addEventListener(
             "load",
-            () => {
+            function () {
 
                 navigator.serviceWorker
                     .register(
                         "/static/sw.js"
                     )
                     .catch(
-                        (error) => {
+                        function (error) {
 
                             console.warn(
                                 "Service worker registration failed:",
                                 error
                             );
-
                         }
                     );
-
             }
         );
-
     }
 
-    // ========================================================
-    // TIMELINE CLICK-TO-SEEK
-    // ========================================================
-    // Clicking (or Enter/Space-ing) a timeline entry jumps the result
-    // video to that timestamp and plays from there. Delegated on
-    // document since the result card is re-rendered on every analysis.
+
+    // ============================================================
+    // TIMELINE CLICK TO SEEK
+    // ============================================================
 
     function seekToTimelineItem(item) {
 
-        const video = document.getElementById("result-video");
-        if (!video) return;
-
-        const start = parseFloat(item.dataset.start);
-        if (Number.isNaN(start)) return;
-
-        video.pause();
-        video.currentTime = start;
-
-        video.scrollIntoView({
-            behavior: "smooth",
-            block: "center",
-        });
-    }
-
-    document.addEventListener("click", (event) => {
-        const item = event.target.closest(".timeline-item.clickable");
-        if (item) seekToTimelineItem(item);
-    });
-
-    document.addEventListener("keydown", (event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        const item = event.target.closest &&
-            event.target.closest(".timeline-item.clickable");
-        if (!item) return;
-        event.preventDefault();
-        seekToTimelineItem(item);
-    });
+        const video =
+            document.getElementById(
+                "result-video"
+            );
 
 
-    // ========================================================
-    // SAVE AN UNKNOWN PERSON AS KNOWN
-    // ========================================================
-    // Each unknown person's card has its own reveal-a-name-field flow.
-    // Saving posts the thumbnail already generated during analysis (no
-    // new photo needed) and, on success, updates that card in place -
-    // the current result stays on screen instead of being lost to a
-    // redirect.
-
-    document.querySelectorAll(".save-unknown").forEach((container) => {
-
-        const openBtn = container.querySelector(".save-unknown-btn");
-        const cancelBtn = container.querySelector(".save-unknown-cancel");
-        const confirmBtn = container.querySelector(".save-unknown-confirm");
-        const nameInput = container.querySelector(".save-unknown-name");
-        const thumbInput = container.querySelector(".save-unknown-thumb");
-        const status = container.querySelector(".save-unknown-status");
-        const card = container.closest(".person-card");
-
-        if (!openBtn || !confirmBtn || !nameInput || !thumbInput) return;
-
-        openBtn.addEventListener("click", () => {
-            container.classList.add("open");
-            nameInput.focus();
-        });
-
-        if (cancelBtn) {
-            cancelBtn.addEventListener("click", () => {
-                container.classList.remove("open");
-                nameInput.value = "";
-                if (status) status.textContent = "";
-            });
+        if (!video) {
+            return;
         }
 
-        nameInput.addEventListener("keydown", (event) => {
-            if (event.key === "Enter") {
-                event.preventDefault();
-                confirmBtn.click();
+
+        const start =
+            parseFloat(
+                item.dataset.start
+            );
+
+
+        if (Number.isNaN(start)) {
+            return;
+        }
+
+
+        video.pause();
+
+        video.currentTime =
+            start;
+
+
+        video.scrollIntoView(
+            {
+                behavior: "smooth",
+                block: "center"
             }
-        });
+        );
+    }
 
-        confirmBtn.addEventListener("click", async () => {
 
-            const name = nameInput.value.trim();
+    document.addEventListener(
+        "click",
+        function (event) {
 
-            if (!name) {
-                if (status) status.textContent = "Enter a name first.";
+            const item =
+                event.target.closest(
+                    ".timeline-item.clickable"
+                );
+
+
+            if (item) {
+                seekToTimelineItem(item);
+            }
+        }
+    );
+
+
+    document.addEventListener(
+        "keydown",
+        function (event) {
+
+            if (
+                event.key !== "Enter" &&
+                event.key !== " "
+            ) {
                 return;
             }
 
-            confirmBtn.disabled = true;
-            if (status) status.textContent = "Saving\u2026";
 
-            try {
+            const item =
+                event.target.closest &&
+                event.target.closest(
+                    ".timeline-item.clickable"
+                );
 
-                const body = new URLSearchParams();
-                body.set("name", name);
-                body.set("thumb", thumbInput.value);
 
-                const response = await fetch("/save_unknown", {
-                    method: "POST",
-                    body,
-                });
-
-                const data = await response.json();
-
-                if (data.ok) {
-
-                    if (card) {
-
-                        card.classList.remove("unknown");
-
-                        const label = card.querySelector(".person-name");
-
-                        if (label) {
-
-                            label.classList.remove("unknown-label");
-
-                            const nameNode = Array.from(label.childNodes).find(
-                                (node) => node.nodeType === Node.TEXT_NODE &&
-                                    node.textContent.trim()
-                            );
-                            if (nameNode) nameNode.textContent = `${data.name} `;
-
-                            const tag = label.querySelector(".tag-unknown, .tag-known");
-                            if (tag) {
-                                tag.textContent = "Known";
-                                tag.classList.remove("tag-unknown");
-                                tag.classList.add("tag-known");
-                            }
-                        }
-                    }
-
-                    container.remove();
-
-                } else {
-
-                    if (status) status.textContent = data.error || "Couldn't save that.";
-                    confirmBtn.disabled = false;
-
-                }
-
-            } catch (error) {
-
-                if (status) status.textContent = "Network error - try again.";
-                confirmBtn.disabled = false;
-
+            if (!item) {
+                return;
             }
 
-        });
 
-    });
+            event.preventDefault();
+
+            seekToTimelineItem(item);
+        }
+    );
+
+
+    // ============================================================
+    // SAVE UNKNOWN PERSON
+    // ============================================================
+
+    document
+        .querySelectorAll(".save-unknown")
+        .forEach(
+            function (container) {
+
+                const openBtn =
+                    container.querySelector(
+                        ".save-unknown-btn"
+                    );
+
+                const cancelBtn =
+                    container.querySelector(
+                        ".save-unknown-cancel"
+                    );
+
+                const confirmBtn =
+                    container.querySelector(
+                        ".save-unknown-confirm"
+                    );
+
+                const nameInput =
+                    container.querySelector(
+                        ".save-unknown-name"
+                    );
+
+                const thumbInput =
+                    container.querySelector(
+                        ".save-unknown-thumb"
+                    );
+
+                const status =
+                    container.querySelector(
+                        ".save-unknown-status"
+                    );
+
+                const card =
+                    container.closest(
+                        ".person-card"
+                    );
+
+
+                if (
+                    !openBtn ||
+                    !confirmBtn ||
+                    !nameInput ||
+                    !thumbInput
+                ) {
+                    return;
+                }
+
+
+                openBtn.addEventListener(
+                    "click",
+                    function () {
+
+                        container.classList.add(
+                            "open"
+                        );
+
+                        nameInput.focus();
+                    }
+                );
+
+
+                if (cancelBtn) {
+
+                    cancelBtn.addEventListener(
+                        "click",
+                        function () {
+
+                            container.classList.remove(
+                                "open"
+                            );
+
+                            nameInput.value =
+                                "";
+
+                            if (status) {
+                                status.textContent =
+                                    "";
+                            }
+                        }
+                    );
+                }
+
+
+                nameInput.addEventListener(
+                    "keydown",
+                    function (event) {
+
+                        if (
+                            event.key === "Enter"
+                        ) {
+
+                            event.preventDefault();
+
+                            confirmBtn.click();
+                        }
+                    }
+                );
+
+
+                confirmBtn.addEventListener(
+                    "click",
+                    async function () {
+
+                        const name =
+                            nameInput.value.trim();
+
+
+                        if (!name) {
+
+                            if (status) {
+                                status.textContent =
+                                    "Enter a name first.";
+                            }
+
+                            return;
+                        }
+
+
+                        confirmBtn.disabled =
+                            true;
+
+
+                        if (status) {
+                            status.textContent =
+                                "Saving…";
+                        }
+
+
+                        try {
+
+                            // ========================================
+                            // GUEST
+                            // ========================================
+
+                            if (
+                                !window.FACETALLY_AUTHENTICATED
+                            ) {
+
+                                const blob =
+                                    await dataUrlToBlob(
+                                        "data:image/jpeg;base64," +
+                                        thumbInput.value
+                                    );
+
+
+                                await putGuestFace(
+                                    {
+                                        name: name,
+                                        filename:
+                                            `${name}.jpg`,
+                                        type:
+                                            "image/jpeg",
+                                        blob: blob,
+                                        createdAt:
+                                            Date.now()
+                                    }
+                                );
+
+
+                                if (card) {
+
+                                    card.classList.remove(
+                                        "unknown"
+                                    );
+
+
+                                    const label =
+                                        card.querySelector(
+                                            ".person-name"
+                                        );
+
+
+                                    if (label) {
+
+                                        label.classList.remove(
+                                            "unknown-label"
+                                        );
+
+
+                                        const nameNode =
+                                            Array.from(
+                                                label.childNodes
+                                            ).find(
+                                                function (node) {
+                                                    return (
+                                                        node.nodeType ===
+                                                        Node.TEXT_NODE &&
+                                                        node.textContent.trim()
+                                                    );
+                                                }
+                                            );
+
+
+                                        if (nameNode) {
+                                            nameNode.textContent =
+                                                `${name} `;
+                                        }
+
+
+                                        const tag =
+                                            label.querySelector(
+                                                ".tag-unknown"
+                                            );
+
+
+                                        if (tag) {
+
+                                            tag.textContent =
+                                                "Known";
+
+                                            tag.classList.remove(
+                                                "tag-unknown"
+                                            );
+
+                                            tag.classList.add(
+                                                "tag-known"
+                                            );
+                                        }
+                                    }
+                                }
+
+
+                                container.remove();
+
+                                await renderGuestKnownPeople();
+
+                                return;
+                            }
+
+
+                            // ========================================
+                            // AUTHENTICATED USER
+                            // ========================================
+
+                            const requestBody =
+                                new URLSearchParams();
+
+
+                            requestBody.set(
+                                "name",
+                                name
+                            );
+
+
+                            requestBody.set(
+                                "thumb",
+                                thumbInput.value
+                            );
+
+
+                            const response =
+                                await fetch(
+                                    "/save_unknown",
+                                    {
+                                        method: "POST",
+                                        body: requestBody,
+                                        credentials:
+                                            "same-origin"
+                                    }
+                                );
+
+
+                            const data =
+                                await response
+                                    .json();
+
+
+                            if (data.ok) {
+
+                                if (card) {
+
+                                    card.classList.remove(
+                                        "unknown"
+                                    );
+
+
+                                    const label =
+                                        card.querySelector(
+                                            ".person-name"
+                                        );
+
+
+                                    if (label) {
+
+                                        label.classList.remove(
+                                            "unknown-label"
+                                        );
+
+
+                                        const nameNode =
+                                            Array.from(
+                                                label.childNodes
+                                            ).find(
+                                                function (node) {
+                                                    return (
+                                                        node.nodeType ===
+                                                        Node.TEXT_NODE &&
+                                                        node.textContent.trim()
+                                                    );
+                                                }
+                                            );
+
+
+                                        if (nameNode) {
+                                            nameNode.textContent =
+                                                `${data.name} `;
+                                        }
+
+
+                                        const tag =
+                                            label.querySelector(
+                                                ".tag-unknown, .tag-known"
+                                            );
+
+
+                                        if (tag) {
+
+                                            tag.textContent =
+                                                "Known";
+
+                                            tag.classList.remove(
+                                                "tag-unknown"
+                                            );
+
+                                            tag.classList.add(
+                                                "tag-known"
+                                            );
+                                        }
+                                    }
+                                }
+
+
+                                container.remove();
+
+                            } else {
+
+                                if (status) {
+                                    status.textContent =
+                                        data.error ||
+                                        "Couldn't save that.";
+                                }
+
+                                confirmBtn.disabled =
+                                    false;
+                            }
+
+                        } catch (error) {
+
+                            console.error(
+                                "Save unknown error:",
+                                error
+                            );
+
+                            if (status) {
+                                status.textContent =
+                                    "Network error - try again.";
+                            }
+
+                            confirmBtn.disabled =
+                                false;
+                        }
+                    }
+                );
+            }
+        );
 
 })();

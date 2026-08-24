@@ -2308,3 +2308,152 @@ details.manage-known .add-known-form {
         underline;
 
 }
+/* ============================================================
+   Firebase / guest authentication additions
+   ============================================================ */
+
+.guest-topbar-actions {
+    margin-left: auto;
+}
+
+.guest-pill {
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 5px 9px;
+}
+
+.login-btn {
+    display: inline-flex;
+    align-items: center;
+    text-decoration: none;
+    width: auto;
+    padding: 6px 12px;
+    font-size: 0.78rem;
+}
+
+.guest-banner {
+    margin: 14px 0 18px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    background: rgba(255,255,255,0.035);
+    color: var(--text-muted);
+    font-size: 0.86rem;
+    line-height: 1.5;
+}
+
+.guest-banner strong {
+    color: var(--text);
+}
+
+.guest-banner a {
+    margin-left: 5px;
+}
+
+.google-auth-btn {
+    width: 100%;
+    margin-top: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 9px;
+}
+
+.google-g {
+    font-weight: 800;
+    font-size: 1.05rem;
+}
+
+.auth-link-btn {
+    width: auto;
+    margin: 10px auto 0;
+    padding: 0;
+    background: transparent;
+    border: 0;
+    color: var(--accent);
+    font-size: 0.86rem;
+}
+
+.auth-link-btn:hover {
+    background: transparent;
+    color: var(--accent);
+}
+
+.auth-status {
+    margin: 10px 0;
+    padding: 9px 11px;
+    border-radius: 9px;
+    font-size: 0.84rem;
+    line-height: 1.4;
+}
+
+.auth-status.error {
+    background: rgba(255, 90, 90, 0.10);
+    border: 1px solid rgba(255, 90, 90, 0.25);
+}
+
+.auth-status.success {
+    background: rgba(0, 200, 150, 0.10);
+    border: 1px solid rgba(0, 200, 150, 0.25);
+}
+
+.auth-status.info {
+    background: rgba(100, 120, 255, 0.10);
+    border: 1px solid rgba(100, 120, 255, 0.25);
+}
+
+.auth-guest-note {
+    margin: 16px 0 8px;
+    color: var(--text-muted);
+    font-size: 0.78rem;
+    line-height: 1.5;
+    text-align: center;
+}
+
+.import-modal {
+    position: fixed;
+    inset: 0;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 18px;
+    background: rgba(0,0,0,0.72);
+}
+
+.import-modal[hidden] {
+    display: none;
+}
+
+.import-modal-card {
+    width: min(440px, 100%);
+    padding: 22px;
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    background: var(--card, #151822);
+    box-shadow: 0 20px 70px rgba(0,0,0,0.45);
+}
+
+.import-modal-card h2 {
+    margin: 0 0 8px;
+}
+
+.import-modal-card p {
+    line-height: 1.5;
+}
+
+.import-modal-actions {
+    display: flex;
+    gap: 10px;
+    margin-top: 16px;
+}
+
+.import-modal-actions button {
+    flex: 1;
+}
+
+.guest-known-list {
+    margin-top: 12px;
+}

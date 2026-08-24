@@ -1,8 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
-
     <meta charset="UTF-8">
 
     <meta
@@ -53,21 +51,20 @@
         rel="stylesheet"
         href="{{ url_for('static', filename='style.css') }}"
     >
-
 </head>
 
-<body>
+<body
+    data-authenticated="{{ 'true' if user else 'false' }}"
+>
 
 <!-- =========================================================
      TOP BAR
 ========================================================= -->
 
 <div class="topbar">
-
     <div class="topbar-inner">
 
         <div class="logo-mark">
-
             <svg
                 viewBox="0 0 24 24"
                 fill="none"
@@ -76,27 +73,19 @@
                 stroke-linecap="round"
                 stroke-linejoin="round"
             >
-
                 <path d="M4 8V5a1 1 0 0 1 1-1h3"/>
-
                 <path d="M20 8V5a1 1 0 0 0-1-1h-3"/>
-
                 <path d="M4 16v3a1 1 0 0 0 1 1h3"/>
-
                 <path d="M20 16v3a1 1 0 0 1-1 1h-3"/>
-
                 <circle
                     cx="12"
                     cy="12"
                     r="3"
                 />
-
             </svg>
-
         </div>
 
         <div>
-
             <div class="brand-name">
                 {{ app_name }}
             </div>
@@ -104,38 +93,65 @@
             <div class="brand-tag">
                 Detect, recognize &amp; count
             </div>
-
         </div>
 
         {% if user %}
 
-            <form
-                class="topbar-logout"
-                action="{{ url_for('logout') }}"
-                method="post"
+        <div class="topbar-logout">
+            <span class="topbar-username">
+                {{ user.username }}
+            </span>
+
+            <button
+                type="button"
+                class="btn-secondary logout-btn"
+                id="logout-btn"
             >
+                Log out
+            </button>
+        </div>
 
-                <span class="topbar-username">
-                    {{ user.username }}
-                </span>
+        {% else %}
 
-                <button
-                    type="submit"
-                    class="btn-secondary logout-btn"
-                >
-                    Log out
-                </button>
+        <div class="topbar-logout guest-topbar-actions">
+            <span class="guest-pill">
+                Guest mode
+            </span>
 
-            </form>
+            <a
+                class="btn-secondary login-btn"
+                href="{{ url_for('login') }}"
+            >
+                Sign in
+            </a>
+        </div>
 
         {% endif %}
 
     </div>
-
 </div>
 
 
 <div class="wrap">
+
+{% if not user %}
+
+<div
+    class="guest-banner"
+    id="guest-banner"
+>
+    <strong>Guest mode:</strong>
+    FaceTally works without login. Your saved faces stay only in this
+    browser and are not stored on the server.
+
+    <a href="{{ url_for('login') }}">
+        Sign in
+    </a>
+    to keep them permanently.
+</div>
+
+{% endif %}
+
 
 <!-- =========================================================
      FLASH MESSAGES
@@ -147,9 +163,9 @@
 
         {% for category, message in messages %}
 
-            <div class="flash {{ category }}">
-                {{ message }}
-            </div>
+        <div class="flash {{ category }}">
+            {{ message }}
+        </div>
 
         {% endfor %}
 
@@ -191,7 +207,6 @@
                     stroke-linecap="round"
                     stroke-linejoin="round"
                 >
-
                     <path
                         d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"
                     />
@@ -206,28 +221,23 @@
                         x2="12"
                         y2="15"
                     />
-
                 </svg>
 
             </div>
 
-
             <div class="dropzone-title">
                 Tap to choose a photo or video
             </div>
-
 
             <div class="dropzone-sub">
                 Your device's picker also lets you pull from
                 Google Drive, Photos, or Files
             </div>
 
-
             <div
                 class="dropzone-filename"
                 id="dropzone-filename"
             ></div>
-
 
             <input
                 type="file"
@@ -314,8 +324,14 @@
 
         <summary>
 
-            <span>
-                {{ known_people|length }} saved — add or remove
+            <span id="known-people-summary">
+
+                {% if user %}
+                    {{ known_people|length }} saved — add or remove
+                {% else %}
+                    0 saved on this device — add or remove
+                {% endif %}
+
             </span>
 
             <span class="chev">
@@ -356,6 +372,7 @@
 
                 </label>
 
+
                 <button
                     type="button"
                     class="file-btn camera-open-btn"
@@ -363,6 +380,7 @@
                 >
                     Use camera
                 </button>
+
 
                 <button
                     type="button"
@@ -384,11 +402,15 @@
     </details>
 
 
-    <!-- ============================================================
-         IN-PAGE CAMERA / RECORDER (shared: Known People + Upload)
-    ============================================================ -->
+    <!-- =====================================================
+         CAMERA / RECORDER
+    ====================================================== -->
 
-    <div class="camera-modal" id="camera-modal" hidden>
+    <div
+        class="camera-modal"
+        id="camera-modal"
+        hidden
+    >
 
         <div class="camera-modal-inner">
 
@@ -399,22 +421,42 @@
                 muted
             ></video>
 
-            <canvas id="camera-canvas" hidden></canvas>
+            <canvas
+                id="camera-canvas"
+                hidden
+            ></canvas>
 
-            <div class="camera-modal-status" id="camera-modal-status"></div>
-            <div class="camera-modal-timer" id="camera-modal-timer"></div>
+            <div
+                class="camera-modal-status"
+                id="camera-modal-status"
+            ></div>
+
+            <div
+                class="camera-modal-timer"
+                id="camera-modal-timer"
+            ></div>
 
             <div class="camera-modal-actions">
 
-                <button type="button" class="btn-secondary" id="camera-cancel-btn">
+                <button
+                    type="button"
+                    class="btn-secondary"
+                    id="camera-cancel-btn"
+                >
                     Cancel
                 </button>
 
-                <button type="button" id="camera-shoot-btn">
+                <button
+                    type="button"
+                    id="camera-shoot-btn"
+                >
                     Take photo
                 </button>
 
-                <button type="button" id="camera-record-btn">
+                <button
+                    type="button"
+                    id="camera-record-btn"
+                >
                     Start recording
                 </button>
 
@@ -425,41 +467,52 @@
     </div>
 
 
+    <!-- =====================================================
+         GUEST KNOWN PEOPLE
+    ====================================================== -->
+
+    <div
+        id="guest-known-list"
+        class="chip-list guest-known-list"
+        hidden
+    ></div>
+
+
     {% if known_people %}
 
-        <div class="chip-list">
+    <div class="chip-list">
 
-            {% for person in known_people %}
+        {% for person in known_people %}
 
-                <div class="chip">
+        <div class="chip">
 
-                    <img
-                        class="chip-avatar"
-                        src="{{ url_for('known_face_image', name=person.name) }}"
-                        alt=""
-                    >
+            <img
+                class="chip-avatar"
+                src="{{ url_for('known_face_image', name=person.name) }}"
+                alt=""
+            >
 
-                    {{ person.name }}
+            {{ person.name }}
 
-                    <form
-                        action="{{ url_for('remove_known', name=person.name) }}"
-                        method="post"
-                    >
+            <form
+                action="{{ url_for('remove_known', name=person.name) }}"
+                method="post"
+            >
 
-                        <button
-                            type="submit"
-                            title="Remove"
-                        >
-                            &times;
-                        </button>
+                <button
+                    type="submit"
+                    title="Remove"
+                >
+                    &times;
+                </button>
 
-                    </form>
-
-                </div>
-
-            {% endfor %}
+            </form>
 
         </div>
+
+        {% endfor %}
+
+    </div>
 
     {% endif %}
 
@@ -481,24 +534,25 @@
 
     {% if result.video_url %}
 
-        <video
-            id="result-video"
-            class="result-video"
-            src="{{ result.video_url }}"
-            controls
-            playsinline
-            preload="metadata"
-        ></video>
+    <video
+        id="result-video"
+        class="result-video"
+        src="{{ result.video_url }}"
+        controls
+        playsinline
+        preload="metadata"
+    ></video>
 
     {% endif %}
 
+
     {% if result.preview_image %}
 
-        <img
-            class="result-preview"
-            src="data:image/png;base64,{{ result.preview_image }}"
-            alt="Annotated preview frame"
-        >
+    <img
+        class="result-preview"
+        src="data:image/png;base64,{{ result.preview_image }}"
+        alt="Annotated preview frame"
+    >
 
     {% endif %}
 
@@ -509,22 +563,20 @@
 
     {% if result.media_type == 'video' %}
 
-        <div
-            class="video-meta"
-            style="margin-top:10px;"
-        >
+    <div
+        class="video-meta"
+        style="margin-top: 10px;"
+    >
 
-            Sampled
-            {{ result.sampled_frames }}
-            frame(s)
+        Sampled
+        {{ result.sampled_frames }}
+        frame(s)
 
-            {% if result.duration %}
+        {% if result.duration %}
+            across ~{{ result.duration }}s of video
+        {% endif %}
 
-                across ~{{ result.duration }}s of video
-
-            {% endif %}
-
-        </div>
+    </div>
 
     {% endif %}
 
@@ -582,207 +634,254 @@
 
     {% if result.persons %}
 
-        <div class="person-list">
+    <div class="person-list">
 
-            {% for p in result.persons %}
+        {% for p in result.persons %}
 
-                <div
-                    class="person-card {{ 'unknown' if not p.is_known else '' }}"
+        <div
+            class="person-card {{ 'unknown' if not p.is_known else '' }}"
+        >
+
+            <div class="avatar-frame">
+
+                <img
+                    src="data:image/jpeg;base64,{{ p.thumb }}"
+                    alt="{{ p.label }}"
                 >
 
-                    <!-- FACE THUMBNAIL -->
+            </div>
 
-                    <div class="avatar-frame">
 
-                        <img
-                            src="data:image/jpeg;base64,{{ p.thumb }}"
-                            alt="{{ p.label }}"
+            <div class="person-info">
+
+                <div
+                    class="person-name {{ 'unknown-label' if not p.is_known else '' }}"
+                >
+
+                    {{ p.label }}
+
+                    {% if p.is_known %}
+
+                    <span class="tag-known">
+                        Known
+                    </span>
+
+                    {% else %}
+
+                    <span class="tag-unknown">
+                        Unknown
+                    </span>
+
+                    {% endif %}
+
+                </div>
+
+
+                <div class="person-sub">
+
+                    {% if result.media_type == 'video' %}
+
+                        appeared in
+                        {{ p.count }}
+                        sampled frame{{ 's' if p.count != 1 }}
+
+                    {% else %}
+
+                        detected
+                        {{ p.count }}
+                        time{{ 's' if p.count != 1 }}
+                        in this photo
+
+                    {% endif %}
+
+                </div>
+
+
+                {% if not p.is_known %}
+
+                <div class="save-unknown">
+
+                    <input
+                        type="hidden"
+                        class="save-unknown-thumb"
+                        value="{{ p.thumb }}"
+                    >
+
+                    <button
+                        type="button"
+                        class="save-unknown-btn"
+                    >
+                        Save as known
+                    </button>
+
+
+                    <div class="save-unknown-form">
+
+                        <input
+                            type="text"
+                            class="save-unknown-name"
+                            placeholder="Name this person"
                         >
+
+                        <button
+                            type="button"
+                            class="save-unknown-confirm"
+                        >
+                            Save
+                        </button>
+
+                        <button
+                            type="button"
+                            class="save-unknown-cancel"
+                        >
+                            Cancel
+                        </button>
 
                     </div>
 
 
-                    <!-- PERSON INFORMATION -->
+                    <div class="save-unknown-status"></div>
 
-                    <div class="person-info">
+                </div>
+
+                {% endif %}
+
+
+                <!-- =================================================
+                     FACE TIMELINE
+                ================================================== -->
+
+                {% if result.media_type == 'video' and p.timeline %}
+
+                <div class="face-timeline">
+
+                    <div class="timeline-title">
+
+                        <span>
+                            Timeline
+                        </span>
+
+                        <span class="timeline-total">
+
+                            {{ p.timeline|length }}
+                            appearance{{ 's' if p.timeline|length != 1 }}
+
+                        </span>
+
+                    </div>
+
+
+                    <div class="timeline-list">
+
+                        {% for period in p.timeline %}
 
                         <div
-                            class="person-name {{ 'unknown-label' if not p.is_known else '' }}"
+                            class="timeline-item{{ ' clickable' if result.video_url }}"
+                            {% if result.video_url %}
+                            data-start="{{ period.start }}"
+                            role="button"
+                            tabindex="0"
+                            title="Jump to {{ period.display }}"
+                            {% endif %}
                         >
 
-                            {{ p.label }}
+                            <span class="timeline-dot"></span>
 
-
-                            {% if p.is_known %}
-
-                                <span class="tag-known">
-                                    Known
-                                </span>
-
-                            {% else %}
-
-                                <span class="tag-unknown">
-                                    Unknown
-                                </span>
-
-                            {% endif %}
+                            <span class="timeline-time">
+                                {{ period.display }}
+                            </span>
 
                         </div>
 
+                        {% endfor %}
 
-                        <div class="person-sub">
-
-                            {% if result.media_type == 'video' %}
-
-                                appeared in
-                                {{ p.count }}
-                                sampled frame{{ 's' if p.count != 1 }}
-
-                            {% else %}
-
-                                detected
-                                {{ p.count }}
-                                time{{ 's' if p.count != 1 }}
-                                in this photo
-
-                            {% endif %}
-
-                        </div>
-
-
-                        {% if not p.is_known %}
-
-                            <div class="save-unknown">
-
-                                <input
-                                    type="hidden"
-                                    class="save-unknown-thumb"
-                                    value="{{ p.thumb }}"
-                                >
-
-                                <button
-                                    type="button"
-                                    class="save-unknown-btn"
-                                >
-                                    Save as known
-                                </button>
-
-                                <div class="save-unknown-form">
-
-                                    <input
-                                        type="text"
-                                        class="save-unknown-name"
-                                        placeholder="Name this person"
-                                    >
-
-                                    <button
-                                        type="button"
-                                        class="save-unknown-confirm"
-                                    >
-                                        Save
-                                    </button>
-
-                                    <button
-                                        type="button"
-                                        class="save-unknown-cancel"
-                                    >
-                                        Cancel
-                                    </button>
-
-                                </div>
-
-                                <div class="save-unknown-status"></div>
-
-                            </div>
-
-                        {% endif %}
-
-
-                        <!-- =================================
-                             FACE TIMELINE
-                        ================================== -->
-
-                        {% if result.media_type == 'video' and p.timeline %}
-
-                            <div class="face-timeline">
-
-                                <div class="timeline-title">
-
-                                    <span>
-                                        Timeline
-                                    </span>
-
-                                    <span class="timeline-total">
-
-                                        {{ p.timeline|length }}
-
-                                        appearance{{ 's' if p.timeline|length != 1 }}
-
-                                    </span>
-
-                                </div>
-
-
-                                <div class="timeline-list">
-
-                                    {% for period in p.timeline %}
-
-                                        <div
-                                            class="timeline-item{{ ' clickable' if result.video_url }}"
-                                            {% if result.video_url %}
-                                            data-start="{{ period.start }}"
-                                            role="button"
-                                            tabindex="0"
-                                            title="Jump to {{ period.display }}"
-                                            {% endif %}
-                                        >
-
-                                            <span class="timeline-dot"></span>
-
-                                            <span class="timeline-time">
-                                                {{ period.display }}
-                                            </span>
-
-                                        </div>
-
-                                    {% endfor %}
-
-                                </div>
-
-                            </div>
-
-                        {% endif %}
-
-                    </div>
-
-
-                    <!-- COUNT -->
-
-                    <div class="count-badge">
-                        {{ p.count }}
                     </div>
 
                 </div>
 
-            {% endfor %}
+                {% endif %}
+
+            </div>
+
+
+            <div class="count-badge">
+                {{ p.count }}
+            </div>
 
         </div>
+
+        {% endfor %}
+
+    </div>
 
 
     {% else %}
 
-        <div class="empty-state">
-
-            No faces detected in that
-            {{ result.media_type }}.
-
-        </div>
+    <div class="empty-state">
+        No faces detected in that
+        {{ result.media_type }}.
+    </div>
 
     {% endif %}
 
 </div>
 
 {% endif %}
+
+
+<!-- =========================================================
+     IMPORT TEMPORARY GUEST FACES
+========================================================= -->
+
+<div
+    class="import-modal"
+    id="guest-import-modal"
+    hidden
+>
+
+    <div class="import-modal-card">
+
+        <h2>
+            Save your temporary faces?
+        </h2>
+
+        <p id="guest-import-count">
+            You have temporary faces saved on this device.
+        </p>
+
+        <p class="hint">
+            Import them into your Firebase account so they remain
+            available after you sign in.
+        </p>
+
+        <div class="import-modal-actions">
+
+            <button
+                type="button"
+                id="guest-import-btn"
+            >
+                Import &amp; Save
+            </button>
+
+            <button
+                type="button"
+                class="btn-secondary"
+                id="guest-import-skip"
+            >
+                Not now
+            </button>
+
+        </div>
+
+        <div
+            id="guest-import-status"
+            class="auth-status"
+            hidden
+        ></div>
+
+    </div>
+
+</div>
 
 
 <!-- =========================================================
@@ -805,11 +904,20 @@
 </div>
 
 
+<!-- Firebase authentication -->
+
+<script
+    type="module"
+    src="{{ url_for('static', filename='firebase-auth.js') }}"
+></script>
+
+
+<!-- Main application JavaScript -->
+
 <script
     src="{{ url_for('static', filename='app.js') }}"
 ></script>
 
 
 </body>
-
 </html>

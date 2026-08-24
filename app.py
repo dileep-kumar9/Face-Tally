@@ -1,18 +1,36 @@
 import base64
 import io
+import json
 import mimetypes
 import os
 import re
 import shutil
-import sqlite3
+import tempfile
 import uuid
 from collections import OrderedDict
 from functools import wraps
 from urllib.parse import parse_qs, urlparse
 
+from dotenv import load_dotenv
+
+# ============================================================
+# LOAD LOCAL ENVIRONMENT VARIABLES
+# ============================================================
+
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Load .env.local for local development.
+# On Render, real environment variables take precedence.
+load_dotenv(os.path.join(BASE_DIR, ".env.local"))
+
+# ============================================================
+# THIRD-PARTY IMPORTS
+# ============================================================
+
 import cv2
 import numpy as np
 import requests
+
 from flask import (
     Flask,
     abort,
@@ -25,12 +43,18 @@ from flask import (
     session,
     url_for,
 )
+
 from PIL import Image, ImageDraw
-from werkzeug.security import (
-    check_password_hash,
-    generate_password_hash,
-)
 import face_recognition
+
+try:
+    import firebase_admin
+    from firebase_admin import auth as firebase_auth
+    from firebase_admin import credentials as firebase_credentials
+except ImportError:
+    firebase_admin = None
+    firebase_auth = None
+    firebase_credentials = None
 
 try:
     import yt_dlp
@@ -49,32 +73,35 @@ app = Flask(__name__)
 _secret_key = os.environ.get("FACETALLY_SECRET_KEY")
 
 if not _secret_key:
-    # A hardcoded fallback secret would be visible in this public repo,
-    # which would let anyone forge valid session cookies once real
-    # accounts/passwords depend on session integrity - not acceptable
-    # once login exists. Generating a random one per process is safe,
-    # but means sessions (i.e. being logged in) won't survive a restart
-    # unless FACETALLY_SECRET_KEY is actually set as a real env var -
-    # set one in Render's dashboard for stable logins across deploys.
     _secret_key = os.urandom(32).hex()
+
     print(
-        "WARNING: FACETALLY_SECRET_KEY is not set - using a random "
-        "key for this process. Everyone will be logged out on the "
-        "next restart. Set FACETALLY_SECRET_KEY as a real environment "
-        "variable to avoid this."
+        "WARNING: FACETALLY_SECRET_KEY is not set. "
+        "A temporary random session key is being used. "
+        "Users will be logged out after restart. "
+        "Set FACETALLY_SECRET_KEY in production."
     )
 
 app.secret_key = _secret_key
 
+app.config["SESSION_COOKIE_HTTPONLY"] = True
+app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+
+app.config["SESSION_COOKIE_SECURE"] = (
+    os.environ.get(
+        "SESSION_COOKIE_SECURE",
+        "true" if os.environ.get("RENDER") else "false",
+    ).lower()
+    == "true"
+)
+
 app.config["MAX_CONTENT_LENGTH"] = 150 * 1024 * 1024
 
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ============================================================
+# DIRECTORIES
+# ============================================================
 
-# Holds one subfolder per user (named by user id), each containing that
-# user's own known-face reference photos. KNOWN_FACES_DIR is kept as the
-# env var name for continuity with existing Render configs; it's now a
-# root directory rather than a flat folder of images.
 KNOWN_FACES_ROOT = os.environ.get(
     "KNOWN_FACES_DIR",
     os.path.join(BASE_DIR, "known_faces"),
@@ -85,215 +112,452 @@ UPLOADS_DIR = os.environ.get(
     os.path.join(BASE_DIR, "uploads"),
 )
 
-# Holds, at most, one video per browser session: the most recently analyzed
-# one, kept around just long enough for its timeline to be clickable/seekable
-# in the <video> player. Not for long-term storage - see _cleanup_session_playback().
 PLAYBACK_DIR = os.environ.get(
     "PLAYBACK_DIR",
     os.path.join(UPLOADS_DIR, "playback"),
-)
-
-# Lives on the same persistent disk as known_faces so accounts survive a
-# redeploy - see the README note about attaching a Render Disk at /data.
-DB_PATH = os.environ.get(
-    "DB_PATH",
-    os.path.join(os.path.dirname(KNOWN_FACES_ROOT.rstrip("/")) or BASE_DIR, "facetally.db"),
 )
 
 os.makedirs(KNOWN_FACES_ROOT, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
 os.makedirs(PLAYBACK_DIR, exist_ok=True)
 
-# Best-effort cleanup of anything left over from a previous run (e.g. after
-# a crash mid-analysis). Safe because PLAYBACK_DIR holds nothing but these
-# transient copies.
-for _leftover in os.listdir(PLAYBACK_DIR):
+
+# ============================================================
+# FIREBASE WEB CONFIG
+# ============================================================
+
+FIREBASE_WEB_CONFIG = {
+    "apiKey": os.environ.get("FIREBASE_API_KEY", ""),
+    "authDomain": os.environ.get("FIREBASE_AUTH_DOMAIN", ""),
+    "projectId": os.environ.get("FIREBASE_PROJECT_ID", ""),
+    "storageBucket": os.environ.get("FIREBASE_STORAGE_BUCKET", ""),
+    "messagingSenderId": os.environ.get(
+        "FIREBASE_MESSAGING_SENDER_ID",
+        "",
+    ),
+    "appId": os.environ.get("FIREBASE_APP_ID", ""),
+}
+
+
+# ============================================================
+# FIREBASE ADMIN
+# ============================================================
+
+def _init_firebase_admin():
+    if firebase_admin is None:
+        print(
+            "WARNING: firebase-admin is not installed. "
+            "Firebase authentication is unavailable."
+        )
+        return None
+
+    if firebase_admin._apps:
+        return firebase_admin.get_app()
+
     try:
-        os.remove(os.path.join(PLAYBACK_DIR, _leftover))
-    except OSError:
-        pass
+        # --------------------------------------------------------
+        # OPTION 1: Full service-account JSON in environment
+        # --------------------------------------------------------
+        service_json = os.environ.get(
+            "FIREBASE_SERVICE_ACCOUNT_JSON",
+            "",
+        ).strip()
 
+        if service_json:
+            info = json.loads(service_json)
 
-# ============================================================
-# ACCOUNTS
-# ============================================================
-
-def get_db():
-    connection = sqlite3.connect(DB_PATH)
-    connection.row_factory = sqlite3.Row
-    return connection
-
-
-def init_db():
-    with get_db() as db:
-        db.execute(
-            """
-            CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                username TEXT UNIQUE NOT NULL,
-                password_hash TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        else:
+            # ----------------------------------------------------
+            # OPTION 2: Local service-account JSON file
+            # ----------------------------------------------------
+            service_file = os.path.join(
+                os.path.dirname(os.path.abspath(__file__)),
+                "firebase-service-account.json",
             )
-            """
+
+            if os.path.exists(service_file):
+                with open(
+                    service_file,
+                    "r",
+                    encoding="utf-8",
+                ) as f:
+                    info = json.load(f)
+
+            else:
+                # ------------------------------------------------
+                # OPTION 3: Individual environment variables
+                # ------------------------------------------------
+                private_key = os.environ.get(
+                    "FIREBASE_PRIVATE_KEY",
+                    "",
+                )
+
+                if private_key:
+                    private_key = private_key.replace(
+                        "\\n",
+                        "\n",
+                    )
+
+                info = {
+                    "type": "service_account",
+                    "project_id": os.environ.get(
+                        "FIREBASE_PROJECT_ID",
+                        "",
+                    ),
+                    "private_key_id": os.environ.get(
+                        "FIREBASE_PRIVATE_KEY_ID",
+                        "",
+                    ),
+                    "private_key": private_key,
+                    "client_email": os.environ.get(
+                        "FIREBASE_CLIENT_EMAIL",
+                        "",
+                    ),
+                    "client_id": os.environ.get(
+                        "FIREBASE_CLIENT_ID",
+                        "",
+                    ),
+                    "auth_uri": (
+                        "https://accounts.google.com/"
+                        "o/oauth2/auth"
+                    ),
+                    "token_uri": (
+                        "https://oauth2.googleapis.com/token"
+                    ),
+                    "auth_provider_x509_cert_url": (
+                        "https://www.googleapis.com/"
+                        "oauth2/v1/certs"
+                    ),
+                    "client_x509_cert_url": os.environ.get(
+                        "FIREBASE_CLIENT_CERT_URL",
+                        "",
+                    ),
+                }
+
+        # --------------------------------------------------------
+        # Validate credentials
+        # --------------------------------------------------------
+        if (
+            not info.get("project_id")
+            or not info.get("private_key")
+            or not info.get("client_email")
+        ):
+            print(
+                "WARNING: Firebase Admin credentials are incomplete."
+            )
+            return None
+
+        # --------------------------------------------------------
+        # Initialize Firebase Admin
+        # --------------------------------------------------------
+        cred = firebase_credentials.Certificate(info)
+
+        app_options = {}
+
+        if info.get("project_id"):
+            app_options["projectId"] = info["project_id"]
+
+        firebase_app = firebase_admin.initialize_app(
+            cred,
+            app_options,
         )
 
-
-init_db()
-
-
-USERNAME_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.\-@]{2,62}$")
-
-
-def create_user(username, password):
-    """Returns the new user's id, or raises ValueError with a user-facing message."""
-
-    username = username.strip()
-
-    if not USERNAME_RE.match(username):
-        raise ValueError(
-            "Username must be 3-64 characters: letters, numbers, "
-            "underscore, period, hyphen, or @ (so an email address works too)."
+        print(
+            "Firebase Admin initialized successfully."
         )
 
-    if len(password) < 6:
-        raise ValueError("Password must be at least 6 characters.")
+        return firebase_app
 
-    password_hash = generate_password_hash(password)
-
-    with get_db() as db:
-
-        existing = db.execute(
-            "SELECT id FROM users WHERE username = ?",
-            (username,),
-        ).fetchone()
-
-        if existing:
-            raise ValueError("That username is already taken.")
-
-        cursor = db.execute(
-            "INSERT INTO users (username, password_hash) VALUES (?, ?)",
-            (username, password_hash),
+    except Exception as exc:
+        print(
+            f"WARNING: Firebase Admin initialization failed: {exc}"
         )
-
-        user_id = cursor.lastrowid
-
-    _migrate_legacy_known_faces_if_first_user(user_id)
-
-    return user_id
+        return None
 
 
-def get_user_by_username(username):
-    with get_db() as db:
-        return db.execute(
-            "SELECT * FROM users WHERE username = ?",
-            (username.strip(),),
-        ).fetchone()
+FIREBASE_ADMIN_APP = _init_firebase_admin()
 
 
-def get_user_by_id(user_id):
-    with get_db() as db:
-        return db.execute(
-            "SELECT * FROM users WHERE id = ?",
-            (user_id,),
-        ).fetchone()
+# ============================================================
+# USER HELPERS
+# ============================================================
+
+def _safe_uid(uid):
+    return re.sub(
+        r"[^A-Za-z0-9_-]",
+        "_",
+        str(uid),
+    )
 
 
 def current_user():
-    user_id = session.get("user_id")
-    if not user_id:
+    uid = session.get("firebase_uid")
+
+    if not uid:
         return None
-    return get_user_by_id(user_id)
+
+    return {
+        "uid": uid,
+        "username": (
+            session.get("email")
+            or session.get("display_name")
+            or "Account"
+        ),
+        "email": session.get(
+            "email",
+            "",
+        ),
+        "display_name": session.get(
+            "display_name",
+            "",
+        ),
+    }
 
 
 def login_required(view):
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not session.get("user_id"):
-            return redirect(url_for("login", next=request.path))
+        if not session.get("firebase_uid"):
+            return redirect(
+                url_for(
+                    "login",
+                    next=request.path,
+                )
+            )
+
         return view(*args, **kwargs)
+
     return wrapped
 
 
 def login_required_json(view):
-    """For fetch()-based JSON endpoints - a redirect response would just
-    break response.json() on the frontend, so this returns a proper 401
-    JSON body instead."""
     @wraps(view)
     def wrapped(*args, **kwargs):
-        if not session.get("user_id"):
+        if not session.get("firebase_uid"):
             return jsonify(
                 {
                     "ok": False,
-                    "error": "Please log in again.",
+                    "error": (
+                        "Please log in to save faces."
+                    ),
                 }
             ), 401
+
         return view(*args, **kwargs)
+
     return wrapped
 
 
 def user_known_faces_dir(user_id):
-    path = os.path.join(KNOWN_FACES_ROOT, str(user_id))
-    os.makedirs(path, exist_ok=True)
+    path = os.path.join(
+        KNOWN_FACES_ROOT,
+        _safe_uid(user_id),
+    )
+
+    os.makedirs(
+        path,
+        exist_ok=True,
+    )
+
     return path
 
 
-def _migrate_legacy_known_faces_if_first_user(new_user_id):
-    """
-    Before accounts existed, known_faces/ was a flat folder shared by
-    everyone. If that folder still has loose image files sitting directly
-    in it (not yet claimed by any user), the very first account created
-    claims them, so existing saved people aren't silently lost.
-    """
-    try:
-        entries = os.listdir(KNOWN_FACES_ROOT)
-    except OSError:
-        return
-
-    loose_files = [
-        f for f in entries
-        if os.path.isfile(os.path.join(KNOWN_FACES_ROOT, f))
-        and allowed_file(f)
-        and not is_video_file(f)
-    ]
-
-    if not loose_files:
-        return
-
-    dest = user_known_faces_dir(new_user_id)
-
-    for filename in loose_files:
-        try:
-            shutil.move(
-                os.path.join(KNOWN_FACES_ROOT, filename),
-                os.path.join(dest, filename),
-            )
-        except OSError:
-            pass
-
-VIDEO_MIME_TYPES = {
-    "mp4": "video/mp4",
-    "webm": "video/webm",
-    "mov": "video/quicktime",
-    "mkv": "video/x-matroska",
-    "avi": "video/x-msvideo",
-    "m4v": "video/x-m4v",
-}
-
+# ============================================================
+# PLAYBACK HELPERS
+# ============================================================
 
 def guess_video_mimetype(filename):
-    ext = ext_of(filename)
-    return VIDEO_MIME_TYPES.get(ext, "video/mp4")
+    """
+    Return the correct MIME type for a video file.
+    """
+
+    extension = (
+        os.path.splitext(filename)[1]
+        .lower()
+    )
+
+    mapping = {
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mov": "video/quicktime",
+        ".avi": "video/x-msvideo",
+        ".mkv": "video/x-matroska",
+        ".m4v": "video/mp4",
+    }
+
+    return mapping.get(
+        extension,
+        "video/mp4",
+    )
 
 
 def cleanup_session_playback():
-    """Delete the previous video kept for this browser session, if any."""
+    """
+    Delete the previous temporary playback video belonging
+    to this browser session.
+    """
+
     info = session.get("playback")
-    if info and info.get("path") and os.path.exists(info["path"]):
+
+    if not info:
+        return
+
+    path = info.get("path")
+
+    if path:
         try:
-            os.remove(info["path"])
+            if os.path.exists(path):
+                os.remove(path)
         except OSError:
             pass
-    session.pop("playback", None)
+
+    session.pop(
+        "playback",
+        None,
+    )
+
+
+# ============================================================
+# FIREBASE ROUTES
+# ============================================================
+
+@app.route("/firebase-config")
+def firebase_config():
+    return jsonify(
+        FIREBASE_WEB_CONFIG
+    )
+
+
+@app.route(
+    "/auth/session",
+    methods=["POST"],
+)
+def firebase_session():
+
+    if FIREBASE_ADMIN_APP is None:
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "Firebase Admin is not "
+                    "configured on the server."
+                ),
+            }
+        ), 503
+
+    data = request.get_json(
+        silent=True
+    ) or {}
+
+    id_token = data.get(
+        "idToken",
+        "",
+    ).strip()
+
+    if not id_token:
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Missing Firebase ID token.",
+            }
+        ), 400
+
+    try:
+        decoded = firebase_auth.verify_id_token(
+            id_token
+        )
+
+    except Exception:
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "Firebase authentication "
+                    "could not be verified."
+                ),
+            }
+        ), 401
+
+    if (
+        decoded.get("firebase", {}).get(
+            "sign_in_provider"
+        )
+        == "anonymous"
+    ):
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "Anonymous Firebase accounts "
+                    "cannot create persistent "
+                    "saved faces."
+                ),
+            }
+        ), 403
+
+    session.clear()
+
+    session["firebase_uid"] = decoded["uid"]
+
+    session["email"] = decoded.get(
+        "email",
+        "",
+    )
+
+    session["display_name"] = decoded.get(
+        "name",
+        "",
+    )
+
+    return jsonify(
+        {
+            "ok": True,
+            "user": current_user(),
+        }
+    )
+
+
+@app.route("/signup")
+def signup():
+
+    if session.get("firebase_uid"):
+        return redirect(
+            url_for("index")
+        )
+
+    return render_template(
+        "signup.html",
+        app_name=APP_NAME,
+    )
+
+
+@app.route("/login")
+def login():
+
+    if session.get("firebase_uid"):
+        return redirect(
+            url_for("index")
+        )
+
+    return render_template(
+        "login.html",
+        app_name=APP_NAME,
+    )
+
+
+@app.route(
+    "/logout",
+    methods=["POST"],
+)
+def logout():
+
+    cleanup_session_playback()
+
+    session.clear()
+
+    return redirect(
+        url_for("index")
+    )
 
 
 # ============================================================
@@ -320,55 +584,23 @@ VIDEO_EXT = {
 ALLOWED_EXT = IMAGE_EXT | VIDEO_EXT
 
 
-# ============================================================
-# FACE MATCHING
-# ============================================================
-
-KNOWN_TOLERANCE = 0.5
-UNKNOWN_CLUSTER_TOLERANCE = 0.5
-
-
-# ============================================================
-# VIDEO SETTINGS
-# ============================================================
-
-# Two samples per second gives better timeline accuracy
-# than the previous 1 FPS configuration.
-TARGET_SAMPLE_FPS = 2.0
-
-# Maximum number of frames analyzed.
-MAX_SAMPLED_FRAMES = 120
-
-
-# ============================================================
-# COLORS
-# ============================================================
-
-KNOWN_COLOR = (0, 200, 150)
-UNKNOWN_COLOR = (255, 180, 70)
-
-
-# ============================================================
-# DOWNLOAD LIMIT
-# ============================================================
-
-MAX_DOWNLOAD_BYTES = 150 * 1024 * 1024
-
-
-# ============================================================
-# GENERAL HELPERS
-# ============================================================
-
 def allowed_file(filename):
     return (
         "." in filename
-        and filename.rsplit(".", 1)[1].lower() in ALLOWED_EXT
+        and filename.rsplit(
+            ".",
+            1,
+        )[1].lower()
+        in ALLOWED_EXT
     )
 
 
 def ext_of(filename):
     return (
-        filename.rsplit(".", 1)[1].lower()
+        filename.rsplit(
+            ".",
+            1,
+        )[1].lower()
         if "." in filename
         else ""
     )
@@ -380,11 +612,47 @@ def is_video_file(filename):
 
 def safe_name(name):
     cleaned = "".join(
-        c for c in name
-        if c.isalnum() or c in (" ", "_", "-")
+        c
+        for c in name
+        if c.isalnum()
+        or c in (
+            " ",
+            "_",
+            "-",
+        )
     )
 
     return cleaned.strip()
+
+
+# ============================================================
+# FACE SETTINGS
+# ============================================================
+
+KNOWN_TOLERANCE = 0.5
+UNKNOWN_CLUSTER_TOLERANCE = 0.5
+
+DETECTION_MAX_WIDTH = 640
+
+TARGET_SAMPLE_FPS = 2.0
+
+MAX_SAMPLED_FRAMES = 120
+
+KNOWN_COLOR = (
+    0,
+    200,
+    150,
+)
+
+UNKNOWN_COLOR = (
+    255,
+    180,
+    70,
+)
+
+MAX_DOWNLOAD_BYTES = (
+    150 * 1024 * 1024
+)
 
 
 # ============================================================
@@ -392,10 +660,15 @@ def safe_name(name):
 # ============================================================
 
 def is_youtube_url(url):
+
     try:
         parsed = urlparse(url)
 
-        host = parsed.netloc.lower().split(":")[0]
+        host = (
+            parsed.netloc
+            .lower()
+            .split(":")[0]
+        )
 
         return (
             host == "youtube.com"
@@ -408,8 +681,11 @@ def is_youtube_url(url):
 
 
 def is_google_drive_url(url):
+
     try:
-        host = urlparse(url).netloc.lower()
+        host = urlparse(
+            url
+        ).netloc.lower()
 
         return (
             "drive.google.com" in host
@@ -420,24 +696,26 @@ def is_google_drive_url(url):
         return False
 
 
-def is_direct_media_url(url):
-    path = urlparse(url).path.lower()
-
-    return any(
-        path.endswith("." + extension)
-        for extension in ALLOWED_EXT
-    )
-
-
 # ============================================================
-# KNOWN FACE MANAGEMENT
+# KNOWN FACES
 # ============================================================
 
 def load_known_faces(known_faces_dir):
+
     known_encodings = []
     known_names = []
 
-    for filename in os.listdir(known_faces_dir):
+    if not os.path.isdir(
+        known_faces_dir
+    ):
+        return (
+            known_encodings,
+            known_names,
+        )
+
+    for filename in os.listdir(
+        known_faces_dir
+    ):
 
         if not allowed_file(filename):
             continue
@@ -451,40 +729,68 @@ def load_known_faces(known_faces_dir):
         )
 
         try:
-            image = face_recognition.load_image_file(path)
+
+            image = face_recognition.load_image_file(
+                path
+            )
 
             encodings = face_recognition.face_encodings(
                 image
             )
 
             if encodings:
-                known_encodings.append(encodings[0])
+
+                known_encodings.append(
+                    encodings[0]
+                )
 
                 known_names.append(
-                    os.path.splitext(filename)[0]
+                    os.path.splitext(
+                        filename
+                    )[0]
                 )
 
         except Exception as exc:
+
             print(
                 f"Could not process known face "
                 f"{filename}: {exc}"
             )
 
-    return known_encodings, known_names
+    return (
+        known_encodings,
+        known_names,
+    )
 
 
-def list_known_people(known_faces_dir):
+def list_known_people(
+    known_faces_dir,
+):
+
+    if not os.path.isdir(
+        known_faces_dir
+    ):
+        return []
+
     people = [
         {
-            "name": os.path.splitext(filename)[0],
+            "name": os.path.splitext(
+                filename
+            )[0],
             "filename": filename,
         }
-        for filename in os.listdir(known_faces_dir)
-        if allowed_file(filename)
-        and not is_video_file(filename)
+        for filename in os.listdir(
+            known_faces_dir
+        )
+        if (
+            allowed_file(filename)
+            and not is_video_file(filename)
+        )
     ]
 
-    people.sort(key=lambda p: p["name"].lower())
+    people.sort(
+        key=lambda p: p["name"].lower()
+    )
 
     return people
 
@@ -497,9 +803,11 @@ def image_to_base64(
     pil_image,
     fmt="PNG",
 ):
+
     buffer = io.BytesIO()
 
     if fmt == "JPEG":
+
         pil_image.save(
             buffer,
             format="JPEG",
@@ -507,6 +815,7 @@ def image_to_base64(
         )
 
     else:
+
         pil_image.save(
             buffer,
             format=fmt,
@@ -522,22 +831,34 @@ def _crop_face_region(
     location,
     pad_ratio=0.35,
 ):
+
     top, right, bottom, left = location
 
     height = bottom - top
     width = right - left
 
-    pad_h = int(height * pad_ratio)
-    pad_w = int(width * pad_ratio)
+    pad_h = int(
+        height * pad_ratio
+    )
 
-    top = max(top - pad_h, 0)
+    pad_w = int(
+        width * pad_ratio
+    )
+
+    top = max(
+        top - pad_h,
+        0,
+    )
 
     bottom = min(
         bottom + pad_h,
         rgb_frame.shape[0],
     )
 
-    left = max(left - pad_w, 0)
+    left = max(
+        left - pad_w,
+        0,
+    )
 
     right = min(
         right + pad_w,
@@ -552,7 +873,9 @@ def _crop_face_region(
     if crop.size == 0:
         crop = rgb_frame
 
-    return Image.fromarray(crop)
+    return Image.fromarray(
+        crop
+    )
 
 
 def crop_thumbnail(
@@ -561,6 +884,7 @@ def crop_thumbnail(
     pad_ratio=0.35,
     size=160,
 ):
+
     image = _crop_face_region(
         rgb_frame,
         location,
@@ -568,7 +892,10 @@ def crop_thumbnail(
     )
 
     image.thumbnail(
-        (size, size)
+        (
+            size,
+            size,
+        )
     )
 
     return image_to_base64(
@@ -582,7 +909,10 @@ def annotate_frame(
     locations,
     labels,
 ):
-    pil_image = Image.fromarray(rgb_frame)
+
+    pil_image = Image.fromarray(
+        rgb_frame
+    )
 
     draw = ImageDraw.Draw(
         pil_image
@@ -592,13 +922,14 @@ def annotate_frame(
         locations,
         labels,
     ):
+
         top, right, bottom, left = location
 
-        if label.startswith("Unknown"):
-            color = UNKNOWN_COLOR
-
-        else:
-            color = KNOWN_COLOR
+        color = (
+            UNKNOWN_COLOR
+            if label.startswith("Unknown")
+            else KNOWN_COLOR
+        )
 
         draw.rectangle(
             (
@@ -610,13 +941,19 @@ def annotate_frame(
         )
 
         bbox = draw.textbbox(
-            (left, bottom),
+            (
+                left,
+                bottom,
+            ),
             label,
         )
 
         draw.rectangle(
             (
-                (left, bottom),
+                (
+                    left,
+                    bottom,
+                ),
                 (
                     bbox[2] + 8,
                     bbox[3] + 6,
@@ -631,12 +968,64 @@ def annotate_frame(
                 bottom + 2,
             ),
             label,
-            fill=(15, 15, 20),
+            fill=(
+                15,
+                15,
+                20,
+            ),
         )
 
-    del draw
-
     return pil_image
+
+
+# ============================================================
+# FAST FACE LOCATION
+# ============================================================
+
+def _locate_faces_fast(rgb):
+
+    height, width = rgb.shape[:2]
+
+    if width <= DETECTION_MAX_WIDTH:
+        return face_recognition.face_locations(
+            rgb
+        )
+
+    scale = (
+        DETECTION_MAX_WIDTH
+        / width
+    )
+
+    small = cv2.resize(
+        rgb,
+        (
+            0,
+            0,
+        ),
+        fx=scale,
+        fy=scale,
+    )
+
+    small_locations = face_recognition.face_locations(
+        small
+    )
+
+    inverse_scale = 1.0 / scale
+
+    return [
+        (
+            int(top * inverse_scale),
+            int(right * inverse_scale),
+            int(bottom * inverse_scale),
+            int(left * inverse_scale),
+        )
+        for (
+            top,
+            right,
+            bottom,
+            left,
+        ) in small_locations
+    ]
 
 
 # ============================================================
@@ -648,14 +1037,20 @@ def sample_video_frames(
     target_fps=TARGET_SAMPLE_FPS,
     max_samples=MAX_SAMPLED_FRAMES,
 ):
-    cap = cv2.VideoCapture(path)
+
+    cap = cv2.VideoCapture(
+        path
+    )
 
     if not cap.isOpened():
         return [], 0.0, 0.0, 0
 
-    fps = cap.get(
-        cv2.CAP_PROP_FPS
-    ) or 25.0
+    fps = (
+        cap.get(
+            cv2.CAP_PROP_FPS
+        )
+        or 25.0
+    )
 
     total_frames = int(
         cap.get(
@@ -670,7 +1065,12 @@ def sample_video_frames(
     )
 
     step = max(
-        int(round(fps / target_fps)),
+        int(
+            round(
+                fps
+                / target_fps
+            )
+        ),
         1,
     )
 
@@ -714,17 +1114,13 @@ def sample_video_frames(
 
 
 # ============================================================
-# TIMELINE HELPERS
+# TIMELINE
 # ============================================================
 
 def _add_timeline_event(
     person,
     timestamp,
 ):
-    """
-    Store every timestamp at which a person
-    was detected.
-    """
 
     person.setdefault(
         "timestamps",
@@ -740,19 +1136,6 @@ def _build_timeline(
     timestamps,
     gap=1.6,
 ):
-    """
-    Convert individual detection timestamps
-    into readable appearance intervals.
-
-    Example:
-
-        0, 0.5, 1, 1.5, 8, 8.5, 9
-
-    becomes:
-
-        00:00 – 00:02
-        00:08 – 00:09
-    """
 
     if not timestamps:
         return []
@@ -771,7 +1154,11 @@ def _build_timeline(
 
     for timestamp in timestamps[1:]:
 
-        if timestamp - previous <= gap:
+        if (
+            timestamp - previous
+            <= gap
+        ):
+
             previous = timestamp
             continue
 
@@ -808,19 +1195,12 @@ def _build_timeline(
 
 
 def format_timestamp(seconds):
-    """
-    Convert seconds into:
-
-    MM:SS
-
-    or
-
-    HH:MM:SS
-    """
 
     seconds = max(
         0,
-        int(round(seconds)),
+        int(
+            round(seconds)
+        ),
     )
 
     hours = seconds // 3600
@@ -832,6 +1212,7 @@ def format_timestamp(seconds):
     secs = seconds % 60
 
     if hours:
+
         return (
             f"{hours:02d}:"
             f"{minutes:02d}:"
@@ -845,254 +1226,7 @@ def format_timestamp(seconds):
 
 
 # ============================================================
-# FACE ANALYSIS
-# ============================================================
-
-# Face *detection* cost scales with pixel count, but phone video/photos are
-# often 1080p+ while a detectable face rarely needs more than a few hundred
-# pixels across. Detecting on a downscaled copy and scaling the resulting
-# boxes back up (the same technique used in face_recognition's own example
-# scripts) cuts detection time substantially with negligible accuracy loss
-# for normally-framed faces. Encodings and thumbnails still use the
-# full-resolution frame, since those benefit from the extra detail.
-DETECTION_MAX_WIDTH = 640
-
-
-def _locate_faces_fast(rgb):
-
-    height, width = rgb.shape[:2]
-
-    if width <= DETECTION_MAX_WIDTH:
-        return face_recognition.face_locations(rgb)
-
-    scale = DETECTION_MAX_WIDTH / width
-
-    small = cv2.resize(
-        rgb,
-        (0, 0),
-        fx=scale,
-        fy=scale,
-    )
-
-    small_locations = face_recognition.face_locations(
-        small
-    )
-
-    inverse_scale = 1.0 / scale
-
-    return [
-        (
-            int(top * inverse_scale),
-            int(right * inverse_scale),
-            int(bottom * inverse_scale),
-            int(left * inverse_scale),
-        )
-        for (top, right, bottom, left) in small_locations
-    ]
-
-
-def _best_reference_frame(frames):
-    """
-    Given sampled video frames, finds the largest single detected face
-    across all of them (a reasonable proxy for 'most clearly facing the
-    camera, closest to it') and returns a padded crop around it plus its
-    encoding. Returns None if no frame had a detectable face. Used for
-    turning a short recorded clip into one clean reference photo.
-    """
-
-    best = None
-
-    for _, rgb in frames:
-
-        for location in _locate_faces_fast(rgb):
-
-            top, right, bottom, left = location
-
-            area = (bottom - top) * (right - left)
-
-            if best is None or area > best[0]:
-                best = (area, rgb, location)
-
-    if best is None:
-        return None
-
-    _, rgb, location = best
-
-    encodings = face_recognition.face_encodings(
-        rgb,
-        [location],
-    )
-
-    if not encodings:
-        return None
-
-    image = _crop_face_region(
-        rgb,
-        location,
-        pad_ratio=0.6,
-    )
-
-    return image, encodings[0]
-
-
-def analyze_frames(
-    frames,
-    known_encodings,
-    known_names,
-):
-    persons = OrderedDict()
-
-    total_detections = 0
-
-    best_frame = None
-
-    for timestamp, rgb in frames:
-
-        locations = _locate_faces_fast(
-            rgb
-        )
-
-        encodings = face_recognition.face_encodings(
-            rgb,
-            locations,
-        )
-
-        frame_labels = []
-
-        for location, encoding in zip(
-            locations,
-            encodings,
-        ):
-
-            total_detections += 1
-
-            label = None
-
-            # ====================================================
-            # MATCH KNOWN PEOPLE
-            # ====================================================
-
-            if known_encodings:
-
-                matches = face_recognition.compare_faces(
-                    known_encodings,
-                    encoding,
-                    tolerance=KNOWN_TOLERANCE,
-                )
-
-                distances = face_recognition.face_distance(
-                    known_encodings,
-                    encoding,
-                )
-
-                if len(distances):
-
-                    best_index = int(
-                        distances.argmin()
-                    )
-
-                    if matches[best_index]:
-
-                        label = known_names[
-                            best_index
-                        ]
-
-            # ====================================================
-            # KNOWN PERSON
-            # ====================================================
-
-            if label is not None:
-
-                if label not in persons:
-
-                    persons[label] = {
-                        "label": label,
-                        "count": 0,
-                        "is_known": True,
-                        "thumb": crop_thumbnail(
-                            rgb,
-                            location,
-                        ),
-                        "first_ts": timestamp,
-                        "last_ts": timestamp,
-                        "timestamps": [],
-                    }
-
-            # ====================================================
-            # UNKNOWN PERSON
-            # ====================================================
-
-            else:
-
-                label = _match_or_create_unknown(
-                    encoding,
-                    rgb,
-                    location,
-                    timestamp,
-                    persons,
-                )
-
-            # ====================================================
-            # RECORD DETECTION
-            # ====================================================
-
-            persons[label]["count"] += 1
-
-            persons[label]["last_ts"] = timestamp
-
-            _add_timeline_event(
-                persons[label],
-                timestamp,
-            )
-
-            frame_labels.append(label)
-
-        # ========================================================
-        # BEST PREVIEW FRAME
-        # ========================================================
-
-        if locations:
-
-            if (
-                best_frame is None
-                or len(locations) > best_frame[0]
-            ):
-                best_frame = (
-                    len(locations),
-                    rgb,
-                    locations,
-                    frame_labels,
-                )
-
-    # ============================================================
-    # CREATE PREVIEW
-    # ============================================================
-
-    preview = None
-
-    if best_frame is not None:
-
-        preview = annotate_frame(
-            best_frame[1],
-            best_frame[2],
-            best_frame[3],
-        )
-
-    elif frames:
-
-        preview = Image.fromarray(
-            frames[0][1]
-        )
-
-    return (
-        persons,
-        total_detections,
-        preview,
-    )
-
-
-# ============================================================
-# UNKNOWN FACE CLUSTERING
+# UNKNOWN PERSON CLUSTERING
 # ============================================================
 
 def _match_or_create_unknown(
@@ -1102,6 +1236,7 @@ def _match_or_create_unknown(
     timestamp,
     persons,
 ):
+
     best_label = None
     best_distance = None
 
@@ -1121,21 +1256,27 @@ def _match_or_create_unknown(
             best_distance is None
             or distance < best_distance
         ):
+
             best_distance = distance
             best_label = label
 
     if (
         best_label is not None
-        and best_distance < UNKNOWN_CLUSTER_TOLERANCE
+        and best_distance
+        < UNKNOWN_CLUSTER_TOLERANCE
     ):
 
-        person = persons[best_label]
+        person = persons[
+            best_label
+        ]
 
         person["_encoding"] = (
-            person["_encoding"] * person["_n"]
+            person["_encoding"]
+            * person["_n"]
             + encoding
         ) / (
-            person["_n"] + 1
+            person["_n"]
+            + 1
         )
 
         person["_n"] += 1
@@ -1172,10 +1313,209 @@ def _match_or_create_unknown(
 
 
 # ============================================================
-# FINALIZE PEOPLE
+# ANALYZE FRAMES
+# ============================================================
+
+def analyze_frames(
+    frames,
+    known_encodings,
+    known_names,
+):
+
+    persons = OrderedDict()
+
+    total_detections = 0
+
+    best_frame = None
+
+    for timestamp, rgb in frames:
+
+        locations = _locate_faces_fast(
+            rgb
+        )
+
+        encodings = face_recognition.face_encodings(
+            rgb,
+            locations,
+        )
+
+        frame_labels = []
+
+        for location, encoding in zip(
+            locations,
+            encodings,
+        ):
+
+            total_detections += 1
+
+            label = None
+
+            if known_encodings:
+
+                matches = face_recognition.compare_faces(
+                    known_encodings,
+                    encoding,
+                    tolerance=KNOWN_TOLERANCE,
+                )
+
+                distances = face_recognition.face_distance(
+                    known_encodings,
+                    encoding,
+                )
+
+                if len(distances):
+
+                    best_index = int(
+                        distances.argmin()
+                    )
+
+                    if matches[best_index]:
+                        label = known_names[
+                            best_index
+                        ]
+
+            if label is not None:
+
+                if label not in persons:
+
+                    persons[label] = {
+                        "label": label,
+                        "count": 0,
+                        "is_known": True,
+                        "thumb": crop_thumbnail(
+                            rgb,
+                            location,
+                        ),
+                        "first_ts": timestamp,
+                        "last_ts": timestamp,
+                        "timestamps": [],
+                    }
+
+            else:
+
+                label = _match_or_create_unknown(
+                    encoding,
+                    rgb,
+                    location,
+                    timestamp,
+                    persons,
+                )
+
+            persons[label]["count"] += 1
+
+            persons[label]["last_ts"] = timestamp
+
+            _add_timeline_event(
+                persons[label],
+                timestamp,
+            )
+
+            frame_labels.append(
+                label
+            )
+
+        if locations:
+
+            if (
+                best_frame is None
+                or len(locations)
+                > best_frame[0]
+            ):
+
+                best_frame = (
+                    len(locations),
+                    rgb,
+                    locations,
+                    frame_labels,
+                )
+
+    preview = None
+
+    if best_frame is not None:
+
+        preview = annotate_frame(
+            best_frame[1],
+            best_frame[2],
+            best_frame[3],
+        )
+
+    elif frames:
+
+        preview = Image.fromarray(
+            frames[0][1]
+        )
+
+    return (
+        persons,
+        total_detections,
+        preview,
+    )
+
+
+# ============================================================
+# BEST REFERENCE FRAME
+# ============================================================
+
+def _best_reference_frame(frames):
+
+    best = None
+
+    for _, rgb in frames:
+
+        for location in _locate_faces_fast(
+            rgb
+        ):
+
+            top, right, bottom, left = location
+
+            area = (
+                bottom - top
+            ) * (
+                right - left
+            )
+
+            if (
+                best is None
+                or area > best[0]
+            ):
+
+                best = (
+                    area,
+                    rgb,
+                    location,
+                )
+
+    if best is None:
+        return None
+
+    _, rgb, location = best
+
+    encodings = face_recognition.face_encodings(
+        rgb,
+        [location],
+    )
+
+    if not encodings:
+        return None
+
+    image = _crop_face_region(
+        rgb,
+        location,
+        pad_ratio=0.6,
+    )
+
+    return (
+        image,
+        encodings[0],
+    )
+
+
+# ============================================================
+# FINALIZE PERSONS
 # ============================================================
 
 def finalize_persons(persons):
+
     result = []
 
     for person in persons.values():
@@ -1200,7 +1540,10 @@ def finalize_persons(persons):
             item["display"] = (
                 start_display
                 if start_display == end_display
-                else f"{start_display} – {end_display}"
+                else (
+                    f"{start_display} – "
+                    f"{end_display}"
+                )
             )
 
         result.append(
@@ -1242,11 +1585,11 @@ def finalize_persons(persons):
 # ============================================================
 
 def resolve_drive_link(url):
+
     url = url.strip()
 
     parsed = urlparse(url)
 
-    # /file/d/FILE_ID/view
     match = re.search(
         r"/file/d/([^/]+)",
         parsed.path,
@@ -1262,12 +1605,13 @@ def resolve_drive_link(url):
             + file_id
         )
 
-    # ?id=FILE_ID
     query = parse_qs(
         parsed.query
     )
 
-    file_ids = query.get("id")
+    file_ids = query.get(
+        "id"
+    )
 
     if (
         "drive.google.com"
@@ -1285,7 +1629,7 @@ def resolve_drive_link(url):
 
 
 # ============================================================
-# DOWNLOAD HELPERS
+# DOWNLOAD
 # ============================================================
 
 DOWNLOAD_HEADERS = {
@@ -1304,9 +1648,13 @@ def _write_response_to_file(
     response,
     path,
 ):
+
     size = 0
 
-    with open(path, "wb") as file:
+    with open(
+        path,
+        "wb",
+    ) as file:
 
         for chunk in response.iter_content(
             8192
@@ -1317,7 +1665,10 @@ def _write_response_to_file(
 
             size += len(chunk)
 
-            if size > MAX_DOWNLOAD_BYTES:
+            if (
+                size
+                > MAX_DOWNLOAD_BYTES
+            ):
 
                 file.close()
 
@@ -1338,6 +1689,7 @@ def _extension_from_response(
     response,
     url,
 ):
+
     content_type = (
         response.headers
         .get(
@@ -1386,11 +1738,14 @@ def _drive_download(
     url,
     dest_dir,
 ):
-    direct_url = resolve_drive_link(url)
 
-    session = requests.Session()
+    direct_url = resolve_drive_link(
+        url
+    )
 
-    response = session.get(
+    client = requests.Session()
+
+    response = client.get(
         direct_url,
         stream=True,
         timeout=30,
@@ -1409,7 +1764,6 @@ def _drive_download(
         .lower()
     )
 
-    # Google may return an HTML confirmation page.
     if "text/html" in content_type:
 
         html = response.text
@@ -1421,7 +1775,9 @@ def _drive_download(
 
         if confirm_match:
 
-            token = confirm_match.group(1)
+            token = confirm_match.group(
+                1
+            )
 
             parsed = urlparse(
                 direct_url
@@ -1431,7 +1787,9 @@ def _drive_download(
                 parsed.query
             )
 
-            file_ids = query.get("id")
+            file_ids = query.get(
+                "id"
+            )
 
             if file_ids:
 
@@ -1443,7 +1801,7 @@ def _drive_download(
                     + token
                 )
 
-                response = session.get(
+                response = client.get(
                     direct_url,
                     stream=True,
                     timeout=30,
@@ -1466,8 +1824,8 @@ def _drive_download(
 
             raise ValueError(
                 "Google Drive did not return "
-                "the media file. Make sure the "
-                "file is publicly accessible."
+                "the media file. Make sure "
+                "the file is publicly accessible."
             )
 
     extension = _extension_from_response(
@@ -1485,7 +1843,8 @@ def _drive_download(
 
     path = os.path.join(
         dest_dir,
-        "drive_download" + extension,
+        "drive_download"
+        + extension,
     )
 
     return _write_response_to_file(
@@ -1502,6 +1861,7 @@ def download_from_url(
     url,
     dest_dir,
 ):
+
     url = url.strip()
 
     if is_google_drive_url(url):
@@ -1536,7 +1896,8 @@ def download_from_url(
 
     path = os.path.join(
         dest_dir,
-        "link_download" + extension,
+        "link_download"
+        + extension,
     )
 
     return _write_response_to_file(
@@ -1546,13 +1907,14 @@ def download_from_url(
 
 
 # ============================================================
-# YOUTUBE DOWNLOAD
+# YOUTUBE
 # ============================================================
 
 def download_youtube_video(
     url,
     dest_dir,
 ):
+
     if yt_dlp is None:
 
         raise RuntimeError(
@@ -1576,37 +1938,24 @@ def download_youtube_video(
             "best[ext=mp4][height<=720]/"
             "best"
         ),
-
         "outtmpl": output_template,
-
         "merge_output_format": "mp4",
-
         "noplaylist": True,
-
         "quiet": True,
-
         "no_warnings": True,
-
         "retries": 3,
-
         "fragment_retries": 3,
-
         "socket_timeout": 30,
-
         "max_filesize": MAX_DOWNLOAD_BYTES,
-
         "http_headers": DOWNLOAD_HEADERS,
-
         "ffmpeg_location": ffmpeg_path,
-
-        # Cloud/datacenter IPs (Render, AWS, etc.) get hit with YouTube's
-        # "Sign in to confirm you're not a bot" challenge far more than
-        # residential IPs, regardless of the video. Identifying as the tv
-        # or mobile player clients instead of the default web client avoids
-        # that challenge in most cases, with no account/cookies needed.
         "extractor_args": {
             "youtube": {
-                "player_client": ["tv", "web_safari", "android"],
+                "player_client": [
+                    "tv",
+                    "web_safari",
+                    "android",
+                ]
             }
         },
     }
@@ -1662,7 +2011,8 @@ def download_youtube_video(
             ):
 
                 candidate_paths.append(
-                    base_path + extension
+                    base_path
+                    + extension
                 )
 
             for candidate in candidate_paths:
@@ -1670,8 +2020,10 @@ def download_youtube_video(
                 if (
                     candidate
                     and os.path.exists(candidate)
-                    and os.path.getsize(candidate) > 0
+                    and os.path.getsize(candidate)
+                    > 0
                 ):
+
                     return candidate
 
             videos = []
@@ -1722,23 +2074,14 @@ def download_youtube_video(
                 "the download. Please try again later."
             ) from exc
 
-        # YouTube's automated-traffic challenge. This is about the
-        # server's IP reputation, not the specific video - it fires on
-        # cloud/datacenter IPs (Render, AWS, etc.) far more than on
-        # residential ones. Checked before the generic "Sign in" branch
-        # below, since this message also contains the words "Sign in".
         if "not a bot" in message_lower:
 
             raise RuntimeError(
-                "YouTube blocked this download as automated traffic "
-                "(a known issue for server-hosted downloads, unrelated "
-                "to this specific video). Please try again in a bit, "
-                "or try a different video."
+                "YouTube blocked this download as "
+                "automated traffic. Please try again "
+                "later or try another video."
             ) from exc
 
-        # Checked before the generic "Sign in" branch below, since this
-        # message also contains the words "Sign in if you've been
-        # granted access to this video".
         if "private video" in message_lower:
 
             raise RuntimeError(
@@ -1748,8 +2091,8 @@ def download_youtube_video(
         if "confirm your age" in message_lower:
 
             raise RuntimeError(
-                "This YouTube video is age-restricted and "
-                "cannot be downloaded by the server."
+                "This YouTube video is age-restricted "
+                "and cannot be downloaded by the server."
             ) from exc
 
         if "sign in" in message_lower:
@@ -1772,18 +2115,14 @@ def download_youtube_video(
         ) from exc
 
 
-# ============================================================
-# MEDIA DOWNLOAD ROUTER
-# ============================================================
-
 def download_media_from_link(
     url,
     dest_dir,
 ):
+
     url = url.strip()
 
     if not url:
-
         raise ValueError(
             "Please provide a link."
         )
@@ -1802,124 +2141,35 @@ def download_media_from_link(
 
 
 # ============================================================
-# ACCOUNTS: SIGNUP / LOGIN / LOGOUT
+# KNOWN PERSON IMAGE
 # ============================================================
 
 @app.route(
-    "/signup",
-    methods=["GET", "POST"],
+    "/known_face_image/<name>"
 )
-def signup():
-
-    if session.get("user_id"):
-        return redirect(url_for("index"))
-
-    if request.method == "GET":
-        return render_template(
-            "signup.html",
-            app_name=APP_NAME,
-        )
-
-    username = request.form.get("username", "")
-    password = request.form.get("password", "")
-    confirm = request.form.get("confirm", "")
-
-    if password != confirm:
-        flash("Passwords don't match.", "error")
-        return render_template(
-            "signup.html",
-            app_name=APP_NAME,
-            username=username,
-        )
-
-    try:
-        user_id = create_user(username, password)
-    except ValueError as exc:
-        flash(str(exc), "error")
-        return render_template(
-            "signup.html",
-            app_name=APP_NAME,
-            username=username,
-        )
-
-    session.clear()
-    session["user_id"] = user_id
-
-    flash("Welcome to FaceTally!", "success")
-    return redirect(url_for("index"))
-
-
-@app.route(
-    "/login",
-    methods=["GET", "POST"],
-)
-def login():
-
-    if session.get("user_id"):
-        return redirect(url_for("index"))
-
-    if request.method == "GET":
-        return render_template(
-            "login.html",
-            app_name=APP_NAME,
-        )
-
-    username = request.form.get("username", "")
-    password = request.form.get("password", "")
-
-    user = get_user_by_username(username)
-
-    if not user or not check_password_hash(user["password_hash"], password):
-        flash("Incorrect username or password.", "error")
-        return render_template(
-            "login.html",
-            app_name=APP_NAME,
-            username=username,
-        )
-
-    session.clear()
-    session["user_id"] = user["id"]
-
-    next_path = request.form.get("next") or request.args.get("next")
-
-    # Only ever redirect to a path within this app - an unchecked "next"
-    # value would be an open-redirect vector.
-    if next_path and next_path.startswith("/") and not next_path.startswith("//"):
-        return redirect(next_path)
-
-    return redirect(url_for("index"))
-
-
-@app.route(
-    "/logout",
-    methods=["POST"],
-)
-def logout():
-    session.clear()
-    flash("Logged out.", "success")
-    return redirect(url_for("login"))
-
-
-# ============================================================
-# KNOWN-PERSON AVATAR IMAGE
-# ============================================================
-
-@app.route("/known_face_image/<name>")
 @login_required
 def known_face_image(name):
-    """Serves a known person's own saved reference photo, scoped to the
-    logged-in user - never any other user's."""
 
-    known_dir = user_known_faces_dir(current_user()["id"])
+    known_dir = user_known_faces_dir(
+        current_user()["uid"]
+    )
 
-    for filename in os.listdir(known_dir):
+    for filename in os.listdir(
+        known_dir
+    ):
+
         if (
-            os.path.splitext(filename)[0] == name
+            os.path.splitext(filename)[0]
+            == name
             and allowed_file(filename)
             and not is_video_file(filename)
         ):
+
             return send_file(
-                os.path.join(known_dir, filename),
+                os.path.join(
+                    known_dir,
+                    filename,
+                ),
                 conditional=True,
             )
 
@@ -1930,11 +2180,7 @@ def known_face_image(name):
 # HOME
 # ============================================================
 
-@app.route(
-    "/",
-    methods=["GET"],
-)
-@login_required
+@app.route("/")
 def index():
 
     user = current_user()
@@ -1943,8 +2189,14 @@ def index():
         "index.html",
         app_name=APP_NAME,
         user=user,
-        known_people=list_known_people(
-            user_known_faces_dir(user["id"])
+        known_people=(
+            list_known_people(
+                user_known_faces_dir(
+                    user["uid"]
+                )
+            )
+            if user
+            else []
         ),
     )
 
@@ -1961,7 +2213,10 @@ def index():
 def add_known():
 
     user = current_user()
-    known_dir = user_known_faces_dir(user["id"])
+
+    known_dir = user_known_faces_dir(
+        user["uid"]
+    )
 
     name = request.form.get(
         "name",
@@ -1972,11 +2227,11 @@ def add_known():
         "photo"
     )
 
-    if not file or file.filename == "":
+    if not file or not file.filename:
 
         flash(
-            "Please choose a photo, record a "
-            "video, or use the camera.",
+            "Please choose a photo, record a video, "
+            "or use the camera.",
             "error",
         )
 
@@ -1984,11 +2239,13 @@ def add_known():
             url_for("index")
         )
 
-    if not allowed_file(file.filename):
+    if not allowed_file(
+        file.filename
+    ):
 
         flash(
-            "Use a photo (JPG/PNG/WebP) or a "
-            "short video clip.",
+            "Use a photo (JPG/PNG/WebP) or "
+            "a short video clip.",
             "error",
         )
 
@@ -2021,12 +2278,20 @@ def add_known():
 
         if is_video:
 
-            frames, duration, _fps, _total = sample_video_frames(
+            (
+                frames,
+                duration,
+                _fps,
+                _total,
+            ) = sample_video_frames(
                 temp_path
             )
 
             media_type = "video"
-            sampled_frames = len(frames)
+
+            sampled_frames = len(
+                frames
+            )
 
         else:
 
@@ -2034,7 +2299,13 @@ def add_known():
                 temp_path
             )
 
-            frames = [(0.0, rgb)]
+            frames = [
+                (
+                    0.0,
+                    rgb,
+                )
+            ]
+
             media_type = "image"
             duration = None
             sampled_frames = None
@@ -2050,13 +2321,11 @@ def add_known():
                 url_for("index")
             )
 
-        # Detect everyone in the shot before deciding what to do - a
-        # solo photo/clip saves directly under the typed name (the
-        # common case, no extra taps), but a shot with several people
-        # in it (e.g. a group photo) shows all of them so each unknown
-        # face can be named and saved individually, same as an
-        # Unknown Person card from a regular analysis.
-        persons_raw, total_detections, preview = analyze_frames(
+        (
+            persons_raw,
+            total_detections,
+            preview,
+        ) = analyze_frames(
             frames,
             known_encodings,
             known_names,
@@ -2066,9 +2335,8 @@ def add_known():
 
             flash(
                 f"No face detected in that "
-                f"{'recording' if is_video else 'photo'}. Try "
-                f"again with better lighting, or facing the "
-                f"camera directly.",
+                f"{'recording' if is_video else 'photo'}. "
+                "Try again with better lighting.",
                 "error",
             )
 
@@ -2077,11 +2345,6 @@ def add_known():
             )
 
         if len(persons_raw) > 1:
-
-            # ------------------------------------------------
-            # GROUP SHOT: hand off to the same results view
-            # Unknown Person cards already use for saving faces
-            # ------------------------------------------------
 
             result = finalize_analysis_result(
                 persons_raw,
@@ -2095,8 +2358,9 @@ def add_known():
             )
 
             flash(
-                f"Detected {len(result['persons'])} people in "
-                f"that shot. Save whichever ones you'd like below.",
+                f"Detected {len(result['persons'])} people "
+                "in that shot. Save whichever ones you'd "
+                "like below.",
                 "success",
             )
 
@@ -2110,10 +2374,6 @@ def add_known():
                 result=result,
             )
 
-        # ------------------------------------------------------
-        # EXACTLY ONE PERSON: the simple, common case
-        # ------------------------------------------------------
-
         only_label, only_person = next(
             iter(persons_raw.items())
         )
@@ -2121,8 +2381,8 @@ def add_known():
         if only_person["is_known"]:
 
             flash(
-                f"That looks like '{only_label}', who's "
-                f"already saved.",
+                f"That looks like '{only_label}', "
+                "who's already saved.",
                 "error",
             )
 
@@ -2156,16 +2416,24 @@ def add_known():
                 url_for("index")
             )
 
-        # Replacing an existing person shouldn't leave a stale
-        # duplicate around under a different extension.
-        for existing in os.listdir(known_dir):
+        for existing in os.listdir(
+            known_dir
+        ):
+
             if (
-                os.path.splitext(existing)[0] == cleaned_name
+                os.path.splitext(existing)[0]
+                == cleaned_name
                 and allowed_file(existing)
                 and not is_video_file(existing)
             ):
+
                 try:
-                    os.remove(os.path.join(known_dir, existing))
+                    os.remove(
+                        os.path.join(
+                            known_dir,
+                            existing,
+                        )
+                    )
                 except OSError:
                     pass
 
@@ -2178,9 +2446,8 @@ def add_known():
             if not best:
 
                 flash(
-                    f"No face detected in that recording for "
-                    f"'{name}'. Try again with better lighting "
-                    f"or hold still facing the camera.",
+                    "No face detected clearly in "
+                    "that recording.",
                     "error",
                 )
 
@@ -2192,13 +2459,24 @@ def add_known():
 
         else:
 
-            location = _locate_faces_fast(
+            locations = _locate_faces_fast(
                 frames[0][1]
-            )[0]
+            )
+
+            if not locations:
+
+                flash(
+                    "No face detected.",
+                    "error",
+                )
+
+                return redirect(
+                    url_for("index")
+                )
 
             cropped_image = _crop_face_region(
                 frames[0][1],
-                location,
+                locations[0],
                 pad_ratio=0.6,
             )
 
@@ -2224,12 +2502,17 @@ def add_known():
 
     finally:
 
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
+        if os.path.exists(
+            temp_path
+        ):
+
+            os.remove(
+                temp_path
+            )
 
 
 # ============================================================
-# SAVE AN UNKNOWN PERSON FROM ANALYZE RESULTS
+# SAVE UNKNOWN PERSON
 # ============================================================
 
 @app.route(
@@ -2238,13 +2521,6 @@ def add_known():
 )
 @login_required_json
 def save_unknown():
-    """
-    Promotes an 'Unknown Person N' from a just-viewed analyze result into
-    a saved known person, using the face thumbnail already generated
-    during analysis (passed back as base64) rather than asking for a
-    fresh photo. JSON in, JSON out - called via fetch() so the result
-    page can update in place instead of losing the current analysis.
-    """
 
     name = request.form.get(
         "name",
@@ -2304,14 +2580,21 @@ def save_unknown():
         ), 400
 
     save_path = os.path.join(
-        user_known_faces_dir(current_user()["id"]),
+        user_known_faces_dir(
+            current_user()["uid"]
+        ),
         f"{cleaned_name}.jpg",
     )
 
-    with open(save_path, "wb") as f:
-        f.write(image_bytes)
-
     try:
+
+        with open(
+            save_path,
+            "wb",
+        ) as f:
+            f.write(
+                image_bytes
+            )
 
         image = face_recognition.load_image_file(
             save_path
@@ -2334,8 +2617,8 @@ def save_unknown():
             {
                 "ok": False,
                 "error": (
-                    "Couldn't detect a clear face in that "
-                    "thumbnail. Try saving a different appearance."
+                    "Couldn't detect a clear face "
+                    "in that thumbnail."
                 ),
             }
         ), 400
@@ -2359,8 +2642,10 @@ def save_unknown():
 @login_required
 def remove_known(name):
 
+    # FIXED:
+    # current_user() returns "uid", not "id".
     known_dir = user_known_faces_dir(
-        current_user()["id"]
+        current_user()["uid"]
     )
 
     for filename in os.listdir(
@@ -2392,6 +2677,10 @@ def remove_known(name):
     )
 
 
+# ============================================================
+# FINALIZE ANALYSIS RESULT
+# ============================================================
+
 def finalize_analysis_result(
     persons_raw,
     total_detections,
@@ -2402,18 +2691,6 @@ def finalize_analysis_result(
     duration=None,
     enable_playback=True,
 ):
-    """
-    Builds the same result dict shape the analyze results template expects,
-    from an already-computed analyze_frames() output. Kept separate from
-    running analyze_frames itself so callers that need to inspect the raw
-    detections first (add_known's single-vs-group-photo check) don't have
-    to run face detection twice.
-
-    If enable_playback and media_type == "video", upload_path is MOVED
-    (not copied) into PLAYBACK_DIR as a side effect - the caller's own
-    cleanup of upload_path should account for it possibly no longer
-    existing at that path afterward.
-    """
 
     persons = finalize_persons(
         persons_raw
@@ -2421,7 +2698,10 @@ def finalize_analysis_result(
 
     video_url = None
 
-    if media_type == "video" and enable_playback:
+    if (
+        media_type == "video"
+        and enable_playback
+    ):
 
         media_filename = os.path.basename(
             upload_path
@@ -2435,12 +2715,18 @@ def finalize_analysis_result(
         )
 
         try:
-            shutil.move(upload_path, playback_path)
+
+            shutil.move(
+                upload_path,
+                playback_path,
+            )
 
             session["playback"] = {
                 "token": token,
                 "path": playback_path,
-                "mimetype": guess_video_mimetype(media_filename),
+                "mimetype": guess_video_mimetype(
+                    media_filename
+                ),
             }
 
             video_url = url_for(
@@ -2453,9 +2739,7 @@ def finalize_analysis_result(
 
     return {
         "media_type": media_type,
-
         "video_url": video_url,
-
         "preview_image": (
             image_to_base64(
                 preview
@@ -2463,41 +2747,249 @@ def finalize_analysis_result(
             if preview is not None
             else None
         ),
-
         "persons": persons,
-
         "total_unique": len(
             persons
         ),
-
         "known_count": sum(
             1
             for person in persons
             if person["is_known"]
         ),
-
         "unknown_count": sum(
             1
             for person in persons
             if not person["is_known"]
         ),
-
-        "total_detections": (
-            total_detections
-        ),
-
+        "total_detections": total_detections,
         "duration": (
             round(duration)
             if duration
             else None
         ),
-
         "sampled_frames": (
             sampled_frames
             if media_type == "video"
             else None
         ),
     }
+
+
+# ============================================================
+# GUEST FACE REFERENCES
+# ============================================================
+
+def load_guest_known_faces_from_request():
+
+    files = request.files.getlist(
+        "guest_known"
+    )
+
+    names = request.form.getlist(
+        "guest_name"
+    )
+
+    if not files:
+        return (
+            [],
+            [],
+            None,
+        )
+
+    temp_dir = tempfile.mkdtemp(
+        prefix="guest_known_",
+        dir=UPLOADS_DIR,
+    )
+
+    for index, file in enumerate(
+        files
+    ):
+
+        if (
+            not file
+            or not file.filename
+        ):
+            continue
+
+        if (
+            not allowed_file(file.filename)
+            or is_video_file(file.filename)
+        ):
+            continue
+
+        name = safe_name(
+            names[index]
+            if index < len(names)
+            else ""
+        )
+
+        if not name:
+            continue
+
+        extension = (
+            ext_of(file.filename)
+            or "jpg"
+        )
+
+        path = os.path.join(
+            temp_dir,
+            f"{name}_{index}.{extension}",
+        )
+
+        file.save(
+            path
+        )
+
+    encodings, known_names = load_known_faces(
+        temp_dir
+    )
+
+    return (
+        encodings,
+        known_names,
+        temp_dir,
+    )
+
+
+# ============================================================
+# IMPORT GUEST FACES AFTER LOGIN
+# ============================================================
+
+@app.route(
+    "/import_known",
+    methods=["POST"],
+)
+@login_required_json
+def import_known():
+
+    files = request.files.getlist(
+        "photos"
+    )
+
+    names = request.form.getlist(
+        "names"
+    )
+
+    if not files:
+
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "No temporary faces were supplied."
+                ),
+            }
+        ), 400
+
+    known_dir = user_known_faces_dir(
+        current_user()["uid"]
+    )
+
+    imported = []
+    skipped = []
+
+    for index, file in enumerate(
+        files
+    ):
+
+        name = safe_name(
+            names[index]
+            if index < len(names)
+            else ""
+        )
+
+        if (
+            not name
+            or not file
+            or not file.filename
+        ):
+
+            skipped.append(
+                name or "Unnamed face"
+            )
+
+            continue
+
+        if (
+            not allowed_file(file.filename)
+            or is_video_file(file.filename)
+        ):
+
+            skipped.append(name)
+
+            continue
+
+        extension = (
+            ext_of(file.filename)
+            or "jpg"
+        )
+
+        temp_path = os.path.join(
+            UPLOADS_DIR,
+            f"import_{uuid.uuid4().hex}.{extension}",
+        )
+
+        save_path = os.path.join(
+            known_dir,
+            f"{name}.jpg",
+        )
+
+        try:
+
+            file.save(
+                temp_path
+            )
+
+            image = face_recognition.load_image_file(
+                temp_path
+            )
+
+            encodings = face_recognition.face_encodings(
+                image
+            )
+
+            if not encodings:
+
+                skipped.append(name)
+
+                continue
+
+            pil = Image.open(
+                temp_path
+            ).convert("RGB")
+
+            pil.save(
+                save_path,
+                format="JPEG",
+                quality=92,
+            )
+
+            imported.append(name)
+
+        except Exception:
+
+            skipped.append(name)
+
+        finally:
+
+            if os.path.exists(
+                temp_path
+            ):
+
+                try:
+                    os.remove(
+                        temp_path
+                    )
+                except OSError:
+                    pass
+
+    return jsonify(
+        {
+            "ok": True,
+            "imported": imported,
+            "skipped": skipped,
+        }
+    )
 
 
 # ============================================================
@@ -2508,10 +3000,11 @@ def finalize_analysis_result(
     "/analyze",
     methods=["POST"],
 )
-@login_required
 def analyze():
 
     cleanup_session_playback()
+
+    guest_known_dir = None
 
     file = request.files.get(
         "media"
@@ -2526,9 +3019,9 @@ def analyze():
 
     try:
 
-        # ====================================================
+        # ----------------------------------------------------
         # DEVICE UPLOAD
-        # ====================================================
+        # ----------------------------------------------------
 
         if file and file.filename:
 
@@ -2537,9 +3030,8 @@ def analyze():
             ):
 
                 flash(
-                    "Unsupported file. "
-                    "Use JPG, PNG, WebP, MP4, MOV, "
-                    "WebM, MKV, AVI, or M4V.",
+                    "Unsupported file. Use JPG, PNG, WebP, "
+                    "MP4, MOV, WebM, MKV, AVI, or M4V.",
                     "error",
                 )
 
@@ -2576,9 +3068,9 @@ def analyze():
                 upload_path
             )
 
-        # ====================================================
+        # ----------------------------------------------------
         # LINK
-        # ====================================================
+        # ----------------------------------------------------
 
         elif url:
 
@@ -2611,6 +3103,7 @@ def analyze():
                 if os.path.exists(
                     upload_path
                 ):
+
                     os.remove(
                         upload_path
                     )
@@ -2625,9 +3118,9 @@ def analyze():
                     url_for("index")
                 )
 
-        # ====================================================
+        # ----------------------------------------------------
         # NOTHING PROVIDED
-        # ====================================================
+        # ----------------------------------------------------
 
         else:
 
@@ -2640,15 +3133,25 @@ def analyze():
                 url_for("index")
             )
 
-        # ====================================================
-        # LOAD KNOWN PEOPLE
-        # ====================================================
+        # ----------------------------------------------------
+        # KNOWN PEOPLE
+        # ----------------------------------------------------
 
-        known_encodings, known_names = (
-            load_known_faces(
-                user_known_faces_dir(current_user()["id"])
+        if current_user():
+
+            known_encodings, known_names = load_known_faces(
+                user_known_faces_dir(
+                    current_user()["uid"]
+                )
             )
-        )
+
+        else:
+
+            (
+                known_encodings,
+                known_names,
+                guest_known_dir,
+            ) = load_guest_known_faces_from_request()
 
         media_filename = os.path.basename(
             upload_path
@@ -2662,9 +3165,9 @@ def analyze():
             else "image"
         )
 
-        # ====================================================
+        # ----------------------------------------------------
         # IMAGE
-        # ====================================================
+        # ----------------------------------------------------
 
         if media_type == "image":
 
@@ -2680,20 +3183,19 @@ def analyze():
             ]
 
             duration = None
-
             sampled_frames = 1
 
-        # ====================================================
+        # ----------------------------------------------------
         # VIDEO
-        # ====================================================
+        # ----------------------------------------------------
 
         else:
 
             (
                 frames,
                 duration,
-                fps,
-                total_frames,
+                _fps,
+                _total_frames,
             ) = sample_video_frames(
                 upload_path
             )
@@ -2713,11 +3215,15 @@ def analyze():
                 frames
             )
 
-        # ====================================================
-        # FACE ANALYSIS + RESULT
-        # ====================================================
+        # ----------------------------------------------------
+        # ANALYSIS
+        # ----------------------------------------------------
 
-        persons_raw, total_detections, preview = analyze_frames(
+        (
+            persons_raw,
+            total_detections,
+            preview,
+        ) = analyze_frames(
             frames,
             known_encodings,
             known_names,
@@ -2729,26 +3235,48 @@ def analyze():
             preview,
             media_type,
             upload_path,
-            sampled_frames=sampled_frames if media_type == "video" else None,
-            duration=duration if media_type == "video" else None,
+            sampled_frames=(
+                sampled_frames
+                if media_type == "video"
+                else None
+            ),
+            duration=(
+                duration
+                if media_type == "video"
+                else None
+            ),
         )
 
-        if media_type == "video" and result["video_url"]:
-            # Moved into PLAYBACK_DIR by finalize_analysis_result - the
-            # `finally` block below should not try to delete it again.
+        if (
+            media_type == "video"
+            and result["video_url"]
+        ):
+
             upload_path = None
+
+        user = current_user()
 
         return render_template(
             "index.html",
             app_name=APP_NAME,
-            user=current_user(),
-            known_people=list_known_people(
-                user_known_faces_dir(current_user()["id"])
+            user=user,
+            known_people=(
+                list_known_people(
+                    user_known_faces_dir(
+                        user["uid"]
+                    )
+                )
+                if user
+                else []
             ),
             result=result,
         )
 
     except Exception as exc:
+
+        print(
+            f"Analysis failed: {exc}"
+        )
 
         flash(
             f"Analysis failed: {exc}",
@@ -2772,37 +3300,68 @@ def analyze():
                 os.remove(
                     upload_path
                 )
-
             except Exception:
                 pass
 
+        if (
+            guest_known_dir
+            and os.path.isdir(
+                guest_known_dir
+            )
+        ):
+
+            shutil.rmtree(
+                guest_known_dir,
+                ignore_errors=True,
+            )
+
 
 # ============================================================
-# SERVE ANALYZED VIDEO (FOR TIMELINE PLAYBACK)
+# SERVE TEMPORARY VIDEO PLAYBACK
 # ============================================================
 
 @app.route("/media/<token>")
-@login_required
 def serve_playback(token):
     """
-    Streams the most recently analyzed video back to this same browser
-    session, so the timeline can seek/play it. Not a general file server -
-    only ever serves the one path this session itself just produced.
+    Serve temporary video playback by token.
+
+    The token maps directly to a file inside PLAYBACK_DIR.
+    This does not depend on the Flask session.
     """
 
-    info = session.get("playback")
-
-    if not info or info.get("token") != token:
+    if not token or not re.fullmatch(
+        r"[a-fA-F0-9]{32}",
+        token,
+    ):
         abort(404)
 
-    path = info.get("path")
+    matching_path = None
 
-    if not path or not os.path.exists(path):
+    for extension in (
+        ".mp4",
+        ".webm",
+        ".mov",
+        ".avi",
+        ".mkv",
+        ".m4v",
+    ):
+        candidate = os.path.join(
+            PLAYBACK_DIR,
+            f"{token}{extension}",
+        )
+
+        if os.path.isfile(candidate):
+            matching_path = candidate
+            break
+
+    if not matching_path:
         abort(404)
 
     return send_file(
-        path,
-        mimetype=info.get("mimetype", "video/mp4"),
+        matching_path,
+        mimetype=guess_video_mimetype(
+            matching_path
+        ),
         conditional=True,
     )
 
