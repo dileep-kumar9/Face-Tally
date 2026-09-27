@@ -13,6 +13,7 @@ __pycache__
 .env
 .env.*
 firebase-service-account.json
+youtube_cookies.txt
 
 node_modules
 

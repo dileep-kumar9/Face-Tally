@@ -436,6 +436,11 @@ h3 {
 
 .dropzone {
 
+    /* The dropzone is a <label>, which is inline by default; without
+       this its border breaks into two empty slivers around the content. */
+    display:
+        block;
+
     border:
         1.5px dashed
         var(--border);
@@ -907,6 +912,14 @@ button.btn-secondary:hover {
 
     text-align:
         center;
+
+}
+
+
+.upload-capture-row {
+
+    margin-top:
+        10px;
 
 }
 
@@ -2456,4 +2469,371 @@ details.manage-known .add-known-form {
 
 .guest-known-list {
     margin-top: 12px;
+}
+
+
+/* ============================================================
+   THIS SESSION (reopenable analyses)
+============================================================ */
+
+.section-title-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.section-title-row form {
+    margin: 0;
+}
+
+.text-btn,
+.text-btn:hover {
+    width: auto;
+    background: transparent;
+    color: var(--text-muted);
+    padding: 2px 4px;
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+}
+
+.text-btn:hover {
+    color: var(--accent);
+}
+
+.history-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+    gap: 10px;
+}
+
+.history-card {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+    transition: border-color 0.15s ease;
+}
+
+.history-card:hover,
+.history-card.active {
+    border-color: var(--accent);
+}
+
+.history-open {
+    display: block;
+    color: inherit;
+    text-decoration: none;
+}
+
+.history-thumb {
+    position: relative;
+    aspect-ratio: 16 / 10;
+    background: var(--surface-2);
+}
+
+.history-thumb img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    /* Faces are usually in the upper part of a portrait photo. */
+    object-position: center 20%;
+    display: block;
+}
+
+.history-badge,
+.history-duration {
+    position: absolute;
+    bottom: 6px;
+    font-size: 0.66rem;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(8, 9, 14, 0.78);
+    color: #fff;
+}
+
+.history-badge {
+    left: 6px;
+}
+
+.history-duration {
+    right: 6px;
+    font-family: var(--font-mono);
+}
+
+.history-body {
+    padding: 8px 10px 10px;
+    display: grid;
+    gap: 2px;
+}
+
+.history-title {
+    font-size: 0.82rem;
+    font-weight: 600;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.history-url,
+.history-names,
+.history-date {
+    font-size: 0.7rem;
+    color: var(--text-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.history-url {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    opacity: 0.85;
+}
+
+.history-names {
+    color: var(--text);
+}
+
+.history-meta {
+    font-size: 0.72rem;
+    color: var(--text-muted);
+    margin-top: 2px;
+}
+
+.history-meta strong {
+    color: var(--text);
+}
+
+.history-play {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 34px;
+    height: 34px;
+    margin: -17px 0 0 -17px;
+    border-radius: 50%;
+    background: rgba(8, 9, 14, 0.7);
+    color: #fff;
+    font-size: 0.8rem;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding-left: 2px;
+}
+
+.history-remove {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    margin: 0;
+}
+
+.history-remove button,
+.history-remove button:hover {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border-radius: 50%;
+    font-size: 1rem;
+    line-height: 1;
+    background: rgba(8, 9, 14, 0.7);
+    color: #fff;
+    opacity: 0;
+    transition: opacity 0.15s ease;
+}
+
+.history-card:hover .history-remove button,
+.history-remove button:focus-visible {
+    opacity: 1;
+}
+
+/* Touch screens have no hover: always show the remove button. */
+@media (hover: none) {
+    .history-remove button {
+        opacity: 1;
+    }
+}
+
+
+/* ============================================================
+   RESULT PLAYER
+============================================================ */
+
+.result-heading {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 10px;
+}
+
+.result-title {
+    font-weight: 600;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.result-source {
+    flex-shrink: 0;
+    font-size: 0.8rem;
+    color: var(--accent);
+    text-decoration: none;
+}
+
+.result-source:hover {
+    text-decoration: underline;
+}
+
+.result-youtube,
+.result-embed {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #000;
+    margin: 4px 0 10px;
+    border: 0;
+    display: block;
+}
+
+.result-youtube iframe {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+}
+
+.result-video {
+    margin-bottom: 10px;
+}
+
+.player-error a {
+    color: var(--accent);
+}
+
+
+/* ============================================================
+   SAVED ANALYSIS: HEADER, OPEN VIDEO, TIMELINE TRACING
+============================================================ */
+
+.section-note {
+    text-transform: none;
+    letter-spacing: 0;
+    font-weight: 500;
+}
+
+.section-note a {
+    color: var(--accent);
+}
+
+.result-heading-text {
+    min-width: 0;
+}
+
+.result-sub {
+    font-size: 0.76rem;
+    color: var(--text-muted);
+    margin-top: 3px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.result-sub .result-source {
+    font-size: inherit;
+}
+
+.open-video-row {
+    display: flex;
+    gap: 8px;
+    margin: 4px 0 12px;
+}
+
+.open-video-row .open-video-btn {
+    flex: 1 1 auto;
+}
+
+.open-video-row .open-original-btn {
+    flex: 0 0 auto;
+    width: auto;
+    display: inline-flex;
+    align-items: center;
+    padding: 0 16px;
+    border-radius: 11px;
+    border: 1px solid var(--border);
+    background: var(--surface-2);
+    color: var(--text);
+    text-decoration: none;
+    font-weight: 600;
+    font-size: 0.9rem;
+}
+
+.player-panel {
+    margin-bottom: 12px;
+}
+
+.now-showing {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    min-height: 1.2em;
+}
+
+.timeline-track {
+    position: relative;
+    height: 12px;
+    margin: 8px 0 8px;
+    border-radius: 6px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    overflow: hidden;
+}
+
+.timeline-segment {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    background: var(--accent);
+    opacity: 0.45;
+    border-radius: 3px;
+}
+
+.person-card.unknown .timeline-segment {
+    background: #ffb446;
+}
+
+.timeline-segment.clickable {
+    cursor: pointer;
+}
+
+.timeline-segment.clickable:hover,
+.timeline-segment.now {
+    opacity: 1;
+}
+
+.timeline-playhead {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 2px;
+    margin-left: -1px;
+    background: #fff;
+    box-shadow: 0 0 4px rgba(0, 0, 0, 0.6);
+    pointer-events: none;
+}
+
+.timeline-item.now {
+    border-color: var(--accent);
+    background: var(--accent-soft);
+    color: var(--text);
+}
+
+.person-card.on-screen {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 1px var(--accent);
 }

@@ -307,6 +307,597 @@
 
 
 <!-- =========================================================
+     YOUR ANALYSES (saved folder)
+========================================================= -->
+
+{% if history %}
+
+{% set kind_labels = {'youtube': 'YouTube', 'drive': 'Google Drive', 'link': 'Link', 'upload': 'Upload'} %}
+
+<div class="section-title section-title-row">
+
+    <span>
+        Your analyses
+        <span class="section-note">
+            {% if user %}
+                · saved to your account
+            {% else %}
+                · saved in this browser — <a href="{{ url_for('login') }}">sign in</a> to keep them permanently
+            {% endif %}
+        </span>
+    </span>
+
+    <form
+        method="post"
+        action="{{ url_for('history_clear') }}"
+        data-confirm="Delete all saved analyses? This can't be undone."
+    >
+        <button
+            type="submit"
+            class="text-btn"
+        >
+            Clear all
+        </button>
+    </form>
+
+</div>
+
+
+<div class="history-grid">
+
+    {% for h in history %}
+
+    <div class="history-card{{ ' active' if entry and entry.id == h.id }}">
+
+        <a
+            class="history-open"
+            href="{{ url_for('history_entry', entry_id=h.id) }}#result"
+            title="{{ h.title }}"
+        >
+
+            <div class="history-thumb">
+
+                <img
+                    src="{{ url_for('history_thumb', entry_id=h.id) }}"
+                    alt=""
+                    loading="lazy"
+                >
+
+                {% if h.media_type == 'video' %}
+                <span class="history-play" aria-hidden="true">▶</span>
+                {% endif %}
+
+                <span class="history-badge">
+                    {{ kind_labels.get(h.kind, 'Link') }}
+                    · {{ 'Video' if h.media_type == 'video' else 'Photo' }}
+                </span>
+
+                {% if h.duration %}
+                <span class="history-duration">
+                    {{ h.duration|timestamp }}
+                </span>
+                {% endif %}
+
+            </div>
+
+            <div class="history-body">
+
+                <div class="history-title">
+                    {{ h.title }}
+                </div>
+
+                <div class="history-url">
+                    {% if h.source_url %}
+                        {{ h.source_url|replace('https://', '')|replace('http://', '')|replace('www.', '') }}
+                    {% else %}
+                        Uploaded from device
+                    {% endif %}
+                </div>
+
+                <div class="history-meta">
+                    <strong>{{ h.total_unique }}</strong> {{ 'person' if h.total_unique == 1 else 'people' }}
+                    · {{ h.known_count }} known
+                    · {{ h.unknown_count }} unknown
+                </div>
+
+                {% if h.known_names %}
+                <div class="history-names">
+                    {{ h.known_names|join(', ') }}
+                </div>
+                {% endif %}
+
+                <time
+                    class="history-date"
+                    data-ts="{{ h.created }}"
+                ></time>
+
+            </div>
+
+        </a>
+
+        <form
+            class="history-remove"
+            method="post"
+            action="{{ url_for('history_delete', entry_id=h.id) }}"
+            data-confirm="Delete this saved analysis?"
+        >
+            <button
+                type="submit"
+                title="Delete this analysis"
+                aria-label="Delete this analysis"
+            >
+                &times;
+            </button>
+        </form>
+
+    </div>
+
+    {% endfor %}
+
+</div>
+
+{% endif %}
+
+
+<!-- =========================================================
+     RESULTS
+========================================================= -->
+
+{% if result %}
+
+{% set playback = entry.playback if entry and not entry.video_missing else none %}
+
+<div class="section-title" id="result">
+    Result
+</div>
+
+
+<div class="card">
+
+    {% if entry %}
+
+    <div class="result-heading">
+
+        <div class="result-heading-text">
+
+            <div class="result-title">
+                {{ entry.title }}
+            </div>
+
+            <div class="result-sub">
+                {% if entry.source_url %}
+                <a
+                    class="result-source"
+                    href="{{ entry.source_url }}"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                >{{ entry.source_url }}</a>
+                {% else %}
+                Uploaded from device
+                {% endif %}
+                · <time data-ts="{{ entry.created }}"></time>
+            </div>
+
+        </div>
+
+    </div>
+
+    {% endif %}
+
+
+    {# Links are never downloaded: YouTube plays in YouTube's own
+       player, other links from their original URL. Uploaded videos
+       play from the server copy. The player loads when opened. #}
+
+    {% if playback %}
+
+    <div class="open-video-row">
+
+        <button
+            type="button"
+            class="open-video-btn"
+            id="open-video-btn"
+        >
+            ▶ Open video
+        </button>
+
+        {% if entry.source_url %}
+        <a
+            class="btn-secondary open-original-btn"
+            href="{{ entry.source_url }}"
+            target="_blank"
+            rel="noopener noreferrer"
+        >
+            Open URL ↗
+        </a>
+        {% endif %}
+
+    </div>
+
+    <div
+        class="player-panel"
+        id="player-panel"
+        data-interval="{{ result.sample_interval or 0.5 }}"
+        hidden
+    >
+
+        {% if playback.type == 'youtube' %}
+
+        <div class="result-youtube">
+            <div
+                id="yt-player"
+                data-video-id="{{ playback.video_id }}"
+            ></div>
+        </div>
+
+        {% else %}
+
+        <video
+            id="result-video"
+            class="result-video"
+            data-src="{{ url_for('serve_playback', entry_id=entry.id) if playback.type == 'file' else playback.url }}"
+            {% if playback.embed_url %}data-fallback-embed="{{ playback.embed_url }}"{% endif %}
+            controls
+            playsinline
+            preload="metadata"
+        ></video>
+
+        <div
+            class="video-meta player-error"
+            id="player-error"
+            hidden
+        >
+            The browser couldn't play this video from its source.
+            {% if entry.source_url %}
+            <a href="{{ entry.source_url }}" target="_blank" rel="noopener noreferrer">Open the original</a>
+            to watch it.
+            {% endif %}
+        </div>
+
+        {% endif %}
+
+        <div
+            class="now-showing"
+            id="now-showing"
+            aria-live="polite"
+        ></div>
+
+    </div>
+
+    {% elif entry and entry.video_missing %}
+
+    <div class="video-meta player-error">
+        The uploaded video file is no longer on the server (it is cleared
+        when the server restarts), but these results and faces are saved.
+        Upload the video again to watch it with the timeline.
+    </div>
+
+    {% endif %}
+
+
+    {% if result.preview_image %}
+
+    <img
+        class="result-preview"
+        src="data:image/jpeg;base64,{{ result.preview_image }}"
+        alt="Annotated preview frame"
+    >
+
+    {% endif %}
+
+
+    <!-- =====================================================
+         VIDEO INFORMATION
+    ====================================================== -->
+
+    {% if result.media_type == 'video' %}
+
+    <div
+        class="video-meta"
+        style="margin-top: 10px;"
+    >
+
+        Sampled
+        {{ result.sampled_frames }}
+        frame(s)
+
+        {% if result.duration %}
+            across {{ result.duration|timestamp }} of video
+        {% endif %}
+
+        {% if playback %}
+            · click a time below to jump there
+        {% endif %}
+
+    </div>
+
+    {% endif %}
+
+
+    <!-- =====================================================
+         STATISTICS
+    ====================================================== -->
+
+    <div class="stat-strip">
+
+        <div class="stat">
+
+            <div class="stat-num">
+                {{ result.total_unique }}
+            </div>
+
+            <div class="stat-label">
+                People
+            </div>
+
+        </div>
+
+
+        <div class="stat">
+
+            <div class="stat-num">
+                {{ result.known_count }}
+            </div>
+
+            <div class="stat-label">
+                Known
+            </div>
+
+        </div>
+
+
+        <div class="stat">
+
+            <div class="stat-num">
+                {{ result.unknown_count }}
+            </div>
+
+            <div class="stat-label">
+                Unknown
+            </div>
+
+        </div>
+
+    </div>
+
+
+    <!-- =====================================================
+         PEOPLE
+    ====================================================== -->
+
+    {% if result.persons %}
+
+    <div class="person-list">
+
+        {% for p in result.persons %}
+
+        <div
+            class="person-card {{ 'unknown' if not p.is_known else '' }}"
+            data-label="{{ p.label }}"
+        >
+
+            <div class="avatar-frame">
+
+                <img
+                    src="data:image/jpeg;base64,{{ p.thumb }}"
+                    alt="{{ p.label }}"
+                >
+
+            </div>
+
+
+            <div class="person-info">
+
+                <div
+                    class="person-name {{ 'unknown-label' if not p.is_known else '' }}"
+                >
+
+                    {{ p.label }}
+
+                    {% if p.is_known %}
+
+                    <span class="tag-known">
+                        Known
+                    </span>
+
+                    {% else %}
+
+                    <span class="tag-unknown">
+                        Unknown
+                    </span>
+
+                    {% endif %}
+
+                </div>
+
+
+                <div class="person-sub">
+
+                    {% if result.media_type == 'video' %}
+
+                        appeared in
+                        {{ p.count }}
+                        sampled frame{{ 's' if p.count != 1 }}
+
+                    {% else %}
+
+                        detected
+                        {{ p.count }}
+                        time{{ 's' if p.count != 1 }}
+                        in this photo
+
+                    {% endif %}
+
+                </div>
+
+
+                {% if not p.is_known %}
+
+                <div class="save-unknown">
+
+                    <input
+                        type="hidden"
+                        class="save-unknown-thumb"
+                        value="{{ p.ref }}"
+                    >
+
+                    <button
+                        type="button"
+                        class="save-unknown-btn"
+                    >
+                        Save as known
+                    </button>
+
+
+                    <div class="save-unknown-form">
+
+                        <input
+                            type="text"
+                            class="save-unknown-name"
+                            placeholder="Name this person"
+                        >
+
+                        <button
+                            type="button"
+                            class="save-unknown-confirm"
+                        >
+                            Save
+                        </button>
+
+                        <button
+                            type="button"
+                            class="save-unknown-cancel"
+                        >
+                            Cancel
+                        </button>
+
+                    </div>
+
+
+                    <div class="save-unknown-status"></div>
+
+                </div>
+
+                {% endif %}
+
+
+                <!-- =================================================
+                     FACE TIMELINE
+                ================================================== -->
+
+                {% if result.media_type == 'video' and p.timeline %}
+
+                <div class="face-timeline">
+
+                    <div class="timeline-title">
+
+                        <span>
+                            Timeline
+                        </span>
+
+                        <span class="timeline-total">
+
+                            {{ p.timeline|length }}
+                            appearance{{ 's' if p.timeline|length != 1 }}
+
+                        </span>
+
+                    </div>
+
+
+                    {# A bar over the whole video: shaded where this
+                       person appears, with a playhead that follows the
+                       player. #}
+
+                    {% if result.duration %}
+
+                    <div
+                        class="timeline-track"
+                        data-duration="{{ result.duration }}"
+                    >
+
+                        {% for period in p.timeline %}
+
+                        <span
+                            class="timeline-segment{{ ' clickable' if playback }}"
+                            data-start="{{ period.start }}"
+                            data-end="{{ period.end }}"
+                            title="{{ period.display }}"
+                            style="left: {{ [period.start / result.duration * 100, 99]|min|round(2) }}%; width: {{ [(period.end - period.start) / result.duration * 100, 1]|max|round(2) }}%;"
+                        ></span>
+
+                        {% endfor %}
+
+                        <span
+                            class="timeline-playhead"
+                            hidden
+                        ></span>
+
+                    </div>
+
+                    {% endif %}
+
+
+                    <div class="timeline-list">
+
+                        {% for period in p.timeline %}
+
+                        <div
+                            class="timeline-item{{ ' clickable' if playback }}"
+                            data-start="{{ period.start }}"
+                            data-end="{{ period.end }}"
+                            {% if playback %}
+                            role="button"
+                            tabindex="0"
+                            title="Jump to {{ period.display }}"
+                            {% endif %}
+                        >
+
+                            <span class="timeline-dot"></span>
+
+                            <span class="timeline-time">
+                                {{ period.display }}
+                            </span>
+
+                        </div>
+
+                        {% endfor %}
+
+                    </div>
+
+                </div>
+
+                {% endif %}
+
+            </div>
+
+
+            <div class="count-badge">
+                {{ p.count }}
+            </div>
+
+        </div>
+
+        {% endfor %}
+
+    </div>
+
+
+    {% else %}
+
+    <div class="empty-state">
+        No faces detected in that
+        {{ result.media_type }}.
+    </div>
+
+    {% endif %}
+
+</div>
+
+{% endif %}
+
+
+<!-- =========================================================
      KNOWN PEOPLE
 ========================================================= -->
 
@@ -523,316 +1114,6 @@
 
 
 <!-- =========================================================
-     RESULTS
-========================================================= -->
-
-{% if result %}
-
-<div class="section-title">
-    Result
-</div>
-
-
-<div class="card">
-
-    {% if result.video_url %}
-
-    <video
-        id="result-video"
-        class="result-video"
-        src="{{ result.video_url }}"
-        controls
-        playsinline
-        preload="metadata"
-    ></video>
-
-    {% endif %}
-
-
-    {% if result.preview_image %}
-
-    <img
-        class="result-preview"
-        src="data:image/jpeg;base64,{{ result.preview_image }}"
-        alt="Annotated preview frame"
-    >
-
-    {% endif %}
-
-
-    <!-- =====================================================
-         VIDEO INFORMATION
-    ====================================================== -->
-
-    {% if result.media_type == 'video' %}
-
-    <div
-        class="video-meta"
-        style="margin-top: 10px;"
-    >
-
-        Sampled
-        {{ result.sampled_frames }}
-        frame(s)
-
-        {% if result.duration %}
-            across ~{{ result.duration }}s of video
-        {% endif %}
-
-    </div>
-
-    {% endif %}
-
-
-    <!-- =====================================================
-         STATISTICS
-    ====================================================== -->
-
-    <div class="stat-strip">
-
-        <div class="stat">
-
-            <div class="stat-num">
-                {{ result.total_unique }}
-            </div>
-
-            <div class="stat-label">
-                People
-            </div>
-
-        </div>
-
-
-        <div class="stat">
-
-            <div class="stat-num">
-                {{ result.known_count }}
-            </div>
-
-            <div class="stat-label">
-                Known
-            </div>
-
-        </div>
-
-
-        <div class="stat">
-
-            <div class="stat-num">
-                {{ result.unknown_count }}
-            </div>
-
-            <div class="stat-label">
-                Unknown
-            </div>
-
-        </div>
-
-    </div>
-
-
-    <!-- =====================================================
-         PEOPLE
-    ====================================================== -->
-
-    {% if result.persons %}
-
-    <div class="person-list">
-
-        {% for p in result.persons %}
-
-        <div
-            class="person-card {{ 'unknown' if not p.is_known else '' }}"
-        >
-
-            <div class="avatar-frame">
-
-                <img
-                    src="data:image/jpeg;base64,{{ p.thumb }}"
-                    alt="{{ p.label }}"
-                >
-
-            </div>
-
-
-            <div class="person-info">
-
-                <div
-                    class="person-name {{ 'unknown-label' if not p.is_known else '' }}"
-                >
-
-                    {{ p.label }}
-
-                    {% if p.is_known %}
-
-                    <span class="tag-known">
-                        Known
-                    </span>
-
-                    {% else %}
-
-                    <span class="tag-unknown">
-                        Unknown
-                    </span>
-
-                    {% endif %}
-
-                </div>
-
-
-                <div class="person-sub">
-
-                    {% if result.media_type == 'video' %}
-
-                        appeared in
-                        {{ p.count }}
-                        sampled frame{{ 's' if p.count != 1 }}
-
-                    {% else %}
-
-                        detected
-                        {{ p.count }}
-                        time{{ 's' if p.count != 1 }}
-                        in this photo
-
-                    {% endif %}
-
-                </div>
-
-
-                {% if not p.is_known %}
-
-                <div class="save-unknown">
-
-                    <input
-                        type="hidden"
-                        class="save-unknown-thumb"
-                        value="{{ p.ref }}"
-                    >
-
-                    <button
-                        type="button"
-                        class="save-unknown-btn"
-                    >
-                        Save as known
-                    </button>
-
-
-                    <div class="save-unknown-form">
-
-                        <input
-                            type="text"
-                            class="save-unknown-name"
-                            placeholder="Name this person"
-                        >
-
-                        <button
-                            type="button"
-                            class="save-unknown-confirm"
-                        >
-                            Save
-                        </button>
-
-                        <button
-                            type="button"
-                            class="save-unknown-cancel"
-                        >
-                            Cancel
-                        </button>
-
-                    </div>
-
-
-                    <div class="save-unknown-status"></div>
-
-                </div>
-
-                {% endif %}
-
-
-                <!-- =================================================
-                     FACE TIMELINE
-                ================================================== -->
-
-                {% if result.media_type == 'video' and p.timeline %}
-
-                <div class="face-timeline">
-
-                    <div class="timeline-title">
-
-                        <span>
-                            Timeline
-                        </span>
-
-                        <span class="timeline-total">
-
-                            {{ p.timeline|length }}
-                            appearance{{ 's' if p.timeline|length != 1 }}
-
-                        </span>
-
-                    </div>
-
-
-                    <div class="timeline-list">
-
-                        {% for period in p.timeline %}
-
-                        <div
-                            class="timeline-item{{ ' clickable' if result.video_url }}"
-                            {% if result.video_url %}
-                            data-start="{{ period.start }}"
-                            role="button"
-                            tabindex="0"
-                            title="Jump to {{ period.display }}"
-                            {% endif %}
-                        >
-
-                            <span class="timeline-dot"></span>
-
-                            <span class="timeline-time">
-                                {{ period.display }}
-                            </span>
-
-                        </div>
-
-                        {% endfor %}
-
-                    </div>
-
-                </div>
-
-                {% endif %}
-
-            </div>
-
-
-            <div class="count-badge">
-                {{ p.count }}
-            </div>
-
-        </div>
-
-        {% endfor %}
-
-    </div>
-
-
-    {% else %}
-
-    <div class="empty-state">
-        No faces detected in that
-        {{ result.media_type }}.
-    </div>
-
-    {% endif %}
-
-</div>
-
-{% endif %}
-
-
-<!-- =========================================================
      IMPORT TEMPORARY GUEST FACES
 ========================================================= -->
 
@@ -893,13 +1174,14 @@
 
 <div class="footer-note">
 
-    Photos and videos are processed on the FaceTally server and
-    deleted afterwards (videos are kept for a few hours for playback).
+    Photos and videos are processed on the FaceTally server. Links
+    are read directly and never downloaded. Signed in, your saved faces
+    and analyses are kept in your account permanently.
 
     <br>
 
-    Video is sampled at ~2 frames/sec,
-    up to 120 frames, for speed.
+    Video is sampled at ~2 frames/sec (up to 120 frames, spread
+    across the whole video for longer ones).
 
 </div>
 

@@ -1862,45 +1862,351 @@
 
 
     // ============================================================
+    // RESULT PLAYER
+    // ============================================================
+    //
+    // The results and faces show first; "Open video" loads the player.
+    // YouTube links play in YouTube's own embedded player, other links
+    // from their original URL, uploads from the server copy. While it
+    // plays, each person's timeline traces the current position.
+
+    const playerPanel =
+        document.getElementById("player-panel");
+
+    const openVideoBtn =
+        document.getElementById("open-video-btn");
+
+    const youtubeHost =
+        document.getElementById("yt-player");
+
+    let resultVideo =
+        document.getElementById("result-video");
+
+    let youtubePlayer = null;
+    let playerReady = null;
+    let traceTimer = null;
+
+
+    function formatClock(totalSeconds) {
+
+        const seconds =
+            Math.max(0, Math.floor(totalSeconds));
+
+        const hours =
+            Math.floor(seconds / 3600);
+
+        const minutes =
+            Math.floor((seconds % 3600) / 60);
+
+        const rest =
+            String(seconds % 60).padStart(2, "0");
+
+        return hours
+            ? `${hours}:${String(minutes).padStart(2, "0")}:${rest}`
+            : `${String(minutes).padStart(2, "0")}:${rest}`;
+    }
+
+
+    function loadYouTubePlayer() {
+
+        return new Promise(function (resolve) {
+
+            function create() {
+
+                youtubePlayer =
+                    new YT.Player(
+                        "yt-player",
+                        {
+                            videoId:
+                                youtubeHost.dataset.videoId,
+                            playerVars: {
+                                playsinline: 1,
+                                rel: 0
+                            },
+                            events: {
+                                onReady: function () {
+                                    resolve();
+                                }
+                            }
+                        }
+                    );
+            }
+
+            if (window.YT && window.YT.Player) {
+                create();
+                return;
+            }
+
+            window.onYouTubeIframeAPIReady = create;
+
+            const apiScript =
+                document.createElement("script");
+
+            apiScript.src =
+                "https://www.youtube.com/iframe_api";
+
+            document.head.appendChild(apiScript);
+        });
+    }
+
+
+    function loadVideoElement() {
+
+        return new Promise(function (resolve) {
+
+            resultVideo.addEventListener(
+                "loadedmetadata",
+                function () {
+                    resolve();
+                },
+                { once: true }
+            );
+
+            // If the browser can't play a linked video directly (e.g.
+            // the host blocks it), use the provider's own player if
+            // there is one, otherwise explain and offer the original.
+            resultVideo.addEventListener(
+                "error",
+                function () {
+
+                    const embedUrl =
+                        resultVideo.dataset.fallbackEmbed;
+
+                    if (embedUrl) {
+
+                        const frame =
+                            document.createElement("iframe");
+
+                        frame.src = embedUrl;
+                        frame.className = "result-embed";
+                        frame.allow = "autoplay; fullscreen";
+                        frame.allowFullscreen = true;
+
+                        resultVideo.replaceWith(frame);
+                        resultVideo = null;
+
+                        // Drive's player can't be controlled from here.
+                        document
+                            .querySelectorAll(".timeline-item.clickable, .timeline-segment.clickable")
+                            .forEach(function (element) {
+                                element.classList.remove("clickable");
+                                element.removeAttribute("role");
+                                element.removeAttribute("tabindex");
+                            });
+
+                    } else {
+
+                        const message =
+                            document.getElementById("player-error");
+
+                        if (message) {
+                            message.hidden = false;
+                        }
+                    }
+
+                    resolve();
+                },
+                { once: true }
+            );
+
+            resultVideo.src =
+                resultVideo.dataset.src;
+        });
+    }
+
+
+    function openPlayer() {
+
+        if (!playerPanel) {
+            return Promise.resolve(false);
+        }
+
+        if (!playerReady) {
+
+            playerPanel.hidden = false;
+
+            if (openVideoBtn) {
+                openVideoBtn.textContent = "▶ Video open";
+                openVideoBtn.disabled = true;
+            }
+
+            playerReady =
+                (youtubeHost ? loadYouTubePlayer() : loadVideoElement())
+                    .then(function () {
+                        startTracing();
+                        return true;
+                    });
+        }
+
+        return playerReady;
+    }
+
+
+    function currentPlayerTime() {
+
+        if (youtubePlayer && typeof youtubePlayer.getCurrentTime === "function") {
+            return youtubePlayer.getCurrentTime() || 0;
+        }
+
+        if (resultVideo) {
+            return resultVideo.currentTime || 0;
+        }
+
+        return null;
+    }
+
+
+    function seekTo(start) {
+
+        openPlayer().then(function () {
+
+            if (youtubePlayer && typeof youtubePlayer.seekTo === "function") {
+
+                youtubePlayer.seekTo(start, true);
+                youtubePlayer.playVideo();
+
+            } else if (resultVideo) {
+
+                resultVideo.currentTime = start;
+                resultVideo.play().catch(function () {});
+
+            } else {
+                return;
+            }
+
+            traceAt(start);
+
+            playerPanel.scrollIntoView(
+                {
+                    behavior: "smooth",
+                    block: "center"
+                }
+            );
+        });
+    }
+
+
+    // Highlight where the video is now: move each person's playhead,
+    // light up the appearance being played, and mark who is on screen.
+    function traceAt(time) {
+
+        if (time === null || Number.isNaN(time)) {
+            return;
+        }
+
+        const tolerance =
+            Math.max(
+                0.75,
+                parseFloat(playerPanel.dataset.interval) || 0.5
+            );
+
+        const onScreen = [];
+
+        document
+            .querySelectorAll(".person-card")
+            .forEach(function (card) {
+
+                let active = false;
+
+                card
+                    .querySelectorAll(".timeline-item, .timeline-segment")
+                    .forEach(function (element) {
+
+                        const start = parseFloat(element.dataset.start);
+                        const end = parseFloat(element.dataset.end);
+
+                        const isNow =
+                            time >= start - tolerance &&
+                            time <= end + tolerance;
+
+                        element.classList.toggle("now", isNow);
+
+                        active = active || isNow;
+                    });
+
+                const track =
+                    card.querySelector(".timeline-track");
+
+                if (track) {
+
+                    const duration =
+                        parseFloat(track.dataset.duration) || 0;
+
+                    const playhead =
+                        track.querySelector(".timeline-playhead");
+
+                    if (playhead && duration > 0) {
+                        playhead.hidden = false;
+                        playhead.style.left =
+                            Math.min(100, (time / duration) * 100) + "%";
+                    }
+                }
+
+                card.classList.toggle("on-screen", active);
+
+                if (active) {
+                    onScreen.push(card.dataset.label);
+                }
+            });
+
+        const nowShowing =
+            document.getElementById("now-showing");
+
+        if (nowShowing) {
+            nowShowing.textContent =
+                onScreen.length
+                    ? `On screen at ${formatClock(time)}: ${onScreen.join(", ")}`
+                    : `At ${formatClock(time)}: no detected faces`;
+        }
+    }
+
+
+    function startTracing() {
+
+        clearInterval(traceTimer);
+
+        traceTimer =
+            setInterval(
+                function () {
+                    traceAt(currentPlayerTime());
+                },
+                250
+            );
+    }
+
+
+    if (openVideoBtn) {
+        openVideoBtn.addEventListener(
+            "click",
+            function () {
+
+                openPlayer();
+
+                playerPanel.scrollIntoView(
+                    {
+                        behavior: "smooth",
+                        block: "center"
+                    }
+                );
+            }
+        );
+    }
+
+
+    // ============================================================
     // TIMELINE CLICK TO SEEK
     // ============================================================
 
     function seekToTimelineItem(item) {
-
-        const video =
-            document.getElementById(
-                "result-video"
-            );
-
-
-        if (!video) {
-            return;
-        }
-
 
         const start =
             parseFloat(
                 item.dataset.start
             );
 
-
-        if (Number.isNaN(start)) {
-            return;
+        if (!Number.isNaN(start)) {
+            seekTo(start);
         }
-
-
-        video.pause();
-
-        video.currentTime =
-            start;
-
-
-        video.scrollIntoView(
-            {
-                behavior: "smooth",
-                block: "center"
-            }
-        );
     }
 
 
@@ -1910,9 +2216,8 @@
 
             const item =
                 event.target.closest(
-                    ".timeline-item.clickable"
+                    ".timeline-item.clickable, .timeline-segment.clickable"
                 );
-
 
             if (item) {
                 seekToTimelineItem(item);
@@ -1932,24 +2237,67 @@
                 return;
             }
 
-
             const item =
                 event.target.closest &&
                 event.target.closest(
                     ".timeline-item.clickable"
                 );
 
-
             if (!item) {
                 return;
             }
-
 
             event.preventDefault();
 
             seekToTimelineItem(item);
         }
     );
+
+
+    // ============================================================
+    // SAVED ANALYSES: LOCAL DATES AND DELETE CONFIRMATION
+    // ============================================================
+
+    document
+        .querySelectorAll("time[data-ts]")
+        .forEach(function (element) {
+
+            const date =
+                new Date(parseFloat(element.dataset.ts) * 1000);
+
+            if (!Number.isNaN(date.getTime())) {
+
+                element.dateTime = date.toISOString();
+
+                element.textContent =
+                    date.toLocaleString(
+                        undefined,
+                        {
+                            day: "numeric",
+                            month: "short",
+                            year: "numeric",
+                            hour: "numeric",
+                            minute: "2-digit"
+                        }
+                    );
+            }
+        });
+
+
+    document
+        .querySelectorAll("form[data-confirm]")
+        .forEach(function (confirmForm) {
+
+            confirmForm.addEventListener(
+                "submit",
+                function (event) {
+
+                    if (!window.confirm(confirmForm.dataset.confirm)) {
+                        event.preventDefault();
+                    }
+                }
+            );
+        });
 
 
     // ============================================================

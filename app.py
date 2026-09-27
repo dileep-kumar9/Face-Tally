@@ -102,6 +102,15 @@ app.config["SESSION_COOKIE_SECURE"] = (
 
 app.config["MAX_CONTENT_LENGTH"] = 150 * 1024 * 1024
 
+# Keep the session cookie across browser restarts, so a guest's
+# analysis folder (and a signed-in user's sign-in) survive them.
+app.config["PERMANENT_SESSION_LIFETIME"] = 365 * 24 * 60 * 60
+
+
+@app.before_request
+def _make_session_permanent():
+    session.permanent = True
+
 
 # ============================================================
 # DIRECTORIES
@@ -117,14 +126,15 @@ UPLOADS_DIR = os.environ.get(
     os.path.join(BASE_DIR, "uploads"),
 )
 
-PLAYBACK_DIR = os.environ.get(
-    "PLAYBACK_DIR",
-    os.path.join(UPLOADS_DIR, "playback"),
+# Per-browser-session history of analyses ("This session" folder).
+HISTORY_DIR = os.environ.get(
+    "HISTORY_DIR",
+    os.path.join(UPLOADS_DIR, "history"),
 )
 
 os.makedirs(KNOWN_FACES_ROOT, exist_ok=True)
 os.makedirs(UPLOADS_DIR, exist_ok=True)
-os.makedirs(PLAYBACK_DIR, exist_ok=True)
+os.makedirs(HISTORY_DIR, exist_ok=True)
 
 
 # ============================================================
@@ -284,6 +294,439 @@ FIREBASE_ADMIN_APP = _init_firebase_admin()
 
 
 # ============================================================
+# PERMANENT STORAGE (Firestore)
+# ============================================================
+#
+# Render's disk is wiped on every deploy/restart unless a paid disk is
+# attached, so signed-in users' saved faces and analysis folder are
+# kept in Firestore. The local folders act as a fast cache:
+#
+#   owners/{owner}/faces/{name}          name, version, image (JPEG)
+#   owners/{owner}/history/{entry_id}    meta, version, thumb, chunks
+#     .../chunks/{i}                     gzip(result JSON), split to
+#                                        stay under Firestore's 1 MiB
+#
+# Each local cache folder has a .cloud.json manifest mapping item ->
+# version, so a sync can tell new, changed, deleted and not-yet-
+# uploaded items apart. Without Firestore everything still works from
+# local disk only.
+
+import gzip
+import threading
+from collections import defaultdict
+
+try:
+    from firebase_admin import firestore as firebase_firestore
+except ImportError:
+    firebase_firestore = None
+
+
+CLOUD_RETRY_SECONDS = 300
+CLOUD_SYNC_SECONDS = 30
+CLOUD_CHUNK_BYTES = 900 * 1024
+MANIFEST_NAME = ".cloud.json"
+
+_cloud_db = None
+_cloud_checked_at = 0.0
+_cloud_lock = threading.Lock()
+_owner_locks = defaultdict(threading.Lock)
+_last_sync = {}
+
+
+def cloud_db():
+    """
+    Return a Firestore client, or None if Firestore isn't usable.
+    Re-checks every few minutes, so enabling Firestore in the console
+    takes effect without a restart.
+    """
+
+    global _cloud_db, _cloud_checked_at
+
+    if _cloud_db is not None:
+        return _cloud_db
+
+    if FIREBASE_ADMIN_APP is None or firebase_firestore is None:
+        return None
+
+    with _cloud_lock:
+
+        if _cloud_db is not None:
+            return _cloud_db
+
+        if time.time() - _cloud_checked_at < CLOUD_RETRY_SECONDS:
+            return None
+
+        _cloud_checked_at = time.time()
+
+        try:
+            client = firebase_firestore.client(FIREBASE_ADMIN_APP)
+            client.collection("owners").limit(1).get()
+            _cloud_db = client
+            print("Firestore connected: saved faces and analyses are permanent.")
+        except Exception as exc:
+            print(
+                "WARNING: Firestore is not available, so saved faces and "
+                f"analyses are stored on local disk only: {exc}"
+            )
+
+    return _cloud_db
+
+
+def _owner_ref(db, owner):
+    return db.collection("owners").document(owner)
+
+
+def _read_manifest(local_dir):
+    try:
+        with open(os.path.join(local_dir, MANIFEST_NAME), "r", encoding="utf-8") as f:
+            data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_manifest(local_dir, manifest):
+    path = os.path.join(local_dir, MANIFEST_NAME)
+    temp_path = path + ".tmp"
+
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f)
+
+    os.replace(temp_path, path)
+
+
+def _manifest_set(local_dir, key, version):
+    manifest = _read_manifest(local_dir)
+
+    if version is None:
+        manifest.pop(key, None)
+    else:
+        manifest[key] = version
+
+    _write_manifest(local_dir, manifest)
+
+
+def _sync_due(kind, owner, force=False):
+    key = (kind, owner)
+    now = time.time()
+
+    if not force and now - _last_sync.get(key, 0) < CLOUD_SYNC_SECONDS:
+        return False
+
+    _last_sync[key] = now
+    return True
+
+
+# ---------------------------------------------------------------
+# Saved faces
+# ---------------------------------------------------------------
+
+def cloud_put_face(owner, name, path):
+    db = cloud_db()
+
+    if db is None:
+        return
+
+    version = uuid.uuid4().hex
+
+    try:
+        with open(path, "rb") as f:
+            image = f.read()
+
+        _owner_ref(db, owner).collection("faces").document(name).set(
+            {
+                "name": name,
+                "version": version,
+                "image": image,
+                "updated": time.time(),
+            }
+        )
+
+        _manifest_set(os.path.dirname(path), name, version)
+
+    except Exception as exc:
+        print(f"WARNING: couldn't save face '{name}' to Firestore: {exc}")
+
+
+def cloud_delete_face(owner, name, local_dir):
+    db = cloud_db()
+
+    if db is None:
+        return
+
+    try:
+        _owner_ref(db, owner).collection("faces").document(name).delete()
+        _manifest_set(local_dir, name, None)
+    except Exception as exc:
+        print(f"WARNING: couldn't delete face '{name}' from Firestore: {exc}")
+
+
+def _local_face_files(local_dir):
+    faces = {}
+
+    for filename in os.listdir(local_dir):
+        name, extension = os.path.splitext(filename)
+
+        if (
+            extension.lstrip(".").lower() in IMAGE_EXT
+            and not filename.startswith(".")
+        ):
+            faces[name] = os.path.join(local_dir, filename)
+
+    return faces
+
+
+def sync_faces(owner, local_dir, force=False):
+    """
+    Bring the local face cache in line with Firestore: download new or
+    changed faces, drop ones deleted elsewhere, and upload faces that
+    only exist locally (e.g. saved before Firestore was enabled).
+    """
+
+    db = cloud_db()
+
+    if db is None or not _sync_due("faces", owner, force):
+        return
+
+    with _owner_locks[owner]:
+
+        try:
+            faces_ref = _owner_ref(db, owner).collection("faces")
+
+            remote = {
+                doc.id: doc.to_dict().get("version")
+                for doc in faces_ref.select(["version"]).stream()
+            }
+
+            manifest = _read_manifest(local_dir)
+            local = _local_face_files(local_dir)
+
+            for name, version in remote.items():
+                if manifest.get(name) == version and name in local:
+                    continue
+
+                data = faces_ref.document(name).get().to_dict() or {}
+
+                if not data.get("image"):
+                    continue
+
+                if name in local:
+                    os.remove(local[name])
+
+                with open(os.path.join(local_dir, f"{name}.jpg"), "wb") as f:
+                    f.write(data["image"])
+
+                manifest[name] = version
+
+            for name in list(manifest):
+                if name not in remote:
+                    # Deleted in Firestore (e.g. from another device).
+                    if name in local:
+                        os.remove(local[name])
+                    manifest.pop(name)
+
+            _write_manifest(local_dir, manifest)
+
+            for name, path in _local_face_files(local_dir).items():
+                if name not in remote and name not in manifest:
+                    cloud_put_face(owner, name, path)
+
+        except Exception as exc:
+            print(f"WARNING: saved-face sync with Firestore failed: {exc}")
+
+
+# ---------------------------------------------------------------
+# Analysis folder
+# ---------------------------------------------------------------
+
+def _entry_ref(db, owner, entry_id):
+    return _owner_ref(db, owner).collection("history").document(entry_id)
+
+
+def cloud_put_entry(owner, local_dir, entry_id):
+    db = cloud_db()
+
+    if db is None:
+        return
+
+    try:
+        meta = _read_json(os.path.join(local_dir, entry_id + ".meta.json"))
+
+        with open(os.path.join(local_dir, entry_id + ".json"), "rb") as f:
+            packed = gzip.compress(f.read())
+
+        thumb = b""
+        thumb_path = os.path.join(local_dir, entry_id + ".jpg")
+
+        if os.path.isfile(thumb_path):
+            with open(thumb_path, "rb") as f:
+                thumb = f.read()
+
+        chunks = [
+            packed[i:i + CLOUD_CHUNK_BYTES]
+            for i in range(0, len(packed), CLOUD_CHUNK_BYTES)
+        ] or [b""]
+
+        ref = _entry_ref(db, owner, entry_id)
+        batch = db.batch()
+
+        for index, chunk in enumerate(chunks):
+            batch.set(
+                ref.collection("chunks").document(str(index)),
+                {"data": chunk},
+            )
+
+        version = uuid.uuid4().hex
+
+        batch.set(
+            ref,
+            {
+                "meta": meta,
+                "version": version,
+                "thumb": thumb,
+                "chunks": len(chunks),
+                "created": meta.get("created", time.time()),
+            },
+        )
+
+        batch.commit()
+
+        _manifest_set(local_dir, entry_id, version)
+
+    except Exception as exc:
+        print(f"WARNING: couldn't save analysis to Firestore: {exc}")
+
+
+def cloud_delete_entry(owner, local_dir, entry_id):
+    db = cloud_db()
+
+    if db is None:
+        return
+
+    try:
+        ref = _entry_ref(db, owner, entry_id)
+
+        for chunk in ref.collection("chunks").stream():
+            chunk.reference.delete()
+
+        ref.delete()
+
+        _manifest_set(local_dir, entry_id, None)
+
+    except Exception as exc:
+        print(f"WARNING: couldn't delete analysis from Firestore: {exc}")
+
+
+def cloud_fetch_result(owner, local_dir, entry_id):
+    """
+    Download an analysis result that isn't in the local cache yet.
+    """
+
+    db = cloud_db()
+
+    if db is None:
+        return None
+
+    try:
+        ref = _entry_ref(db, owner, entry_id)
+        doc = ref.get()
+
+        if not doc.exists:
+            return None
+
+        count = int(doc.to_dict().get("chunks") or 0)
+
+        packed = b"".join(
+            (ref.collection("chunks").document(str(i)).get().to_dict() or {}).get("data", b"")
+            for i in range(count)
+        )
+
+        result = json.loads(gzip.decompress(packed))
+
+        _write_json(os.path.join(local_dir, entry_id + ".json"), result)
+
+        return result
+
+    except Exception as exc:
+        print(f"WARNING: couldn't load analysis from Firestore: {exc}")
+        return None
+
+
+def sync_history(owner, local_dir, force=False):
+    """
+    Bring the local analysis folder in line with Firestore. Results are
+    fetched lazily when an analysis is opened; only summaries and
+    thumbnails are downloaded here.
+    """
+
+    db = cloud_db()
+
+    if db is None or not _sync_due("history", owner, force):
+        return
+
+    with _owner_locks[owner]:
+
+        try:
+            history_ref = _owner_ref(db, owner).collection("history")
+
+            remote = {}
+
+            for doc in history_ref.select(["meta", "version"]).stream():
+                data = doc.to_dict()
+                remote[doc.id] = data
+
+            manifest = _read_manifest(local_dir)
+
+            for entry_id, data in remote.items():
+                if not _HEX_ID.fullmatch(entry_id):
+                    continue
+
+                meta_path = os.path.join(local_dir, entry_id + ".meta.json")
+
+                if manifest.get(entry_id) == data.get("version") and os.path.isfile(meta_path):
+                    continue
+
+                # New or changed elsewhere: refresh the summary and
+                # thumbnail, and drop any stale cached result.
+                _write_json(meta_path, data.get("meta") or {})
+
+                thumb = (history_ref.document(entry_id).get(["thumb"]).to_dict() or {}).get("thumb")
+
+                if thumb:
+                    with open(os.path.join(local_dir, entry_id + ".jpg"), "wb") as f:
+                        f.write(thumb)
+
+                try:
+                    os.remove(os.path.join(local_dir, entry_id + ".json"))
+                except OSError:
+                    pass
+
+                manifest[entry_id] = data.get("version")
+
+            for entry_id in list(manifest):
+                if entry_id not in remote:
+                    history_delete_entry(local_dir, entry_id, cloud=False)
+                    manifest.pop(entry_id)
+
+            _write_manifest(local_dir, manifest)
+
+            # Upload analyses that only exist locally (made before
+            # Firestore was enabled, or brought over from guest mode).
+            for meta in history_list(local_dir):
+                entry_id = meta.get("id", "")
+
+                if (
+                    entry_id not in remote
+                    and entry_id not in manifest
+                    and os.path.isfile(os.path.join(local_dir, entry_id + ".json"))
+                ):
+                    cloud_put_entry(owner, local_dir, entry_id)
+
+        except Exception as exc:
+            print(f"WARNING: analysis folder sync with Firestore failed: {exc}")
+
+
+# ============================================================
 # USER HELPERS
 # ============================================================
 
@@ -364,7 +807,18 @@ def user_known_faces_dir(user_id):
         exist_ok=True,
     )
 
+    # Restore faces from Firestore (e.g. after a Render restart wiped
+    # the disk) and upload any that only exist here.
+    sync_faces(
+        face_owner(path),
+        path,
+    )
+
     return path
+
+
+def face_owner(known_dir):
+    return "u_" + os.path.basename(known_dir)
 
 
 # ============================================================
@@ -396,59 +850,312 @@ def guess_video_mimetype(filename):
     )
 
 
-def cleanup_session_playback():
+# ============================================================
+# ANALYSIS FOLDER ("Your analyses")
+# ============================================================
+#
+# Every analysis is saved so it can be reopened later without
+# re-analysing. Signed-in users' folders are permanent (Firestore, see
+# PERMANENT STORAGE); guests' folders are tied to a long-lived browser
+# cookie and move into the account when the guest signs in.
+#
+# Local layout, one folder per owner under HISTORY_DIR:
+#
+#   <entry>.meta.json   summary shown on the folder card
+#   <entry>.json        full result (faces, timeline, preview)
+#   <entry>.jpg         preview thumbnail
+#   <entry>.<ext>       uploaded video, for playback (links are never
+#                       downloaded; they play from their source)
+
+HISTORY_MAX_ENTRIES = 50
+GUEST_HISTORY_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
+USER_CACHE_MAX_AGE_SECONDS = 2 * 24 * 60 * 60
+
+_HEX_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def current_owner(create_guest=True):
     """
-    Delete the previous temporary playback video belonging
-    to this browser session.
-    """
-
-    info = session.get("playback")
-
-    if not info:
-        return
-
-    path = info.get("path")
-
-    if path:
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except OSError:
-            pass
-
-    session.pop(
-        "playback",
-        None,
-    )
-
-
-PLAYBACK_MAX_AGE_SECONDS = 6 * 60 * 60
-
-
-def purge_old_playback(max_age=PLAYBACK_MAX_AGE_SECONDS):
-    """
-    Delete playback videos older than max_age. Sessions that never
-    come back would otherwise leave their videos on disk forever.
+    "u_<uid>" for a signed-in user, "g_<id>" for a guest browser.
     """
 
-    cutoff = time.time() - max_age
+    uid = session.get("firebase_uid")
+
+    if uid:
+        return "u_" + _safe_uid(uid)
+
+    guest_id = session.get("guest_id")
+
+    if not (isinstance(guest_id, str) and _HEX_ID.fullmatch(guest_id)):
+        if not create_guest:
+            return None
+
+        guest_id = uuid.uuid4().hex
+        session["guest_id"] = guest_id
+
+    return "g_" + guest_id
+
+
+def owner_is_user(owner):
+    return bool(owner) and owner.startswith("u_")
+
+
+def owner_history_dir(create=False):
+    owner = current_owner(create_guest=create)
+
+    if not owner:
+        return None
+
+    path = os.path.join(HISTORY_DIR, owner)
+
+    if create or owner_is_user(owner):
+        os.makedirs(path, exist_ok=True)
+    elif not os.path.isdir(path):
+        return None
+
+    if owner_is_user(owner):
+        sync_history(owner, path)
+
+    # Mark the folder as in use so it isn't purged.
+    try:
+        os.utime(path)
+    except OSError:
+        pass
+
+    return path
+
+
+def purge_old_history():
+    """
+    Drop guest folders unused for 30 days, and user cache folders
+    (which Firestore can restore) unused for 2 days.
+    """
+
+    now = time.time()
+    cloud = cloud_db() is not None
 
     try:
-        filenames = os.listdir(PLAYBACK_DIR)
+        names = os.listdir(HISTORY_DIR)
     except OSError:
         return
 
-    for filename in filenames:
-        path = os.path.join(PLAYBACK_DIR, filename)
+    for name in names:
+        path = os.path.join(HISTORY_DIR, name)
+
+        if name.startswith("g_"):
+            max_age = GUEST_HISTORY_MAX_AGE_SECONDS
+        elif name.startswith("u_") and cloud:
+            max_age = USER_CACHE_MAX_AGE_SECONDS
+        else:
+            continue
 
         try:
-            if (
-                os.path.isfile(path)
-                and os.path.getmtime(path) < cutoff
-            ):
-                os.remove(path)
+            if os.path.isdir(path) and os.path.getmtime(path) < now - max_age:
+                shutil.rmtree(path, ignore_errors=True)
         except OSError:
             pass
+
+
+def _write_json(path, data):
+    temp_path = path + ".tmp"
+
+    with open(temp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f)
+
+    os.replace(temp_path, path)
+
+
+def _read_json(path):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def history_list(history_dir):
+    if not history_dir or not os.path.isdir(history_dir):
+        return []
+
+    entries = []
+
+    for filename in os.listdir(history_dir):
+        if filename.endswith(".meta.json"):
+            meta = _read_json(
+                os.path.join(history_dir, filename)
+            )
+
+            if meta and meta.get("id"):
+                entries.append(meta)
+
+    entries.sort(
+        key=lambda meta: meta.get("created", 0),
+        reverse=True,
+    )
+
+    return entries
+
+
+def history_delete_entry(history_dir, entry_id, cloud=True):
+    for filename in os.listdir(history_dir):
+        if filename.split(".", 1)[0] == entry_id:
+            try:
+                os.remove(os.path.join(history_dir, filename))
+            except OSError:
+                pass
+
+    owner = os.path.basename(history_dir)
+
+    if cloud and owner_is_user(owner):
+        cloud_delete_entry(owner, history_dir, entry_id)
+
+
+def history_add(
+    meta,
+    result,
+    thumb_image,
+    video_path=None,
+):
+    """
+    Save an analysis to the current owner's folder and return its id.
+    """
+
+    history_dir = owner_history_dir(create=True)
+    owner = os.path.basename(history_dir)
+
+    entry_id = uuid.uuid4().hex
+
+    meta = dict(
+        meta,
+        id=entry_id,
+        created=time.time(),
+        total_unique=result["total_unique"],
+        known_count=result["known_count"],
+        unknown_count=result["unknown_count"],
+        known_names=[
+            person["label"]
+            for person in result["persons"]
+            if person["is_known"]
+        ][:5],
+        duration=result["duration"],
+    )
+
+    if video_path:
+        extension = os.path.splitext(video_path)[1].lower()
+        filename = entry_id + extension
+
+        shutil.move(
+            video_path,
+            os.path.join(history_dir, filename),
+        )
+
+        meta["playback"] = {
+            "type": "file",
+            "file": filename,
+        }
+
+    if thumb_image is not None:
+        thumb = thumb_image.convert("RGB")
+        thumb.thumbnail((360, 360))
+        thumb.save(
+            os.path.join(history_dir, entry_id + ".jpg"),
+            format="JPEG",
+            quality=80,
+        )
+
+    _write_json(
+        os.path.join(history_dir, entry_id + ".json"),
+        result,
+    )
+
+    _write_json(
+        os.path.join(history_dir, entry_id + ".meta.json"),
+        meta,
+    )
+
+    if owner_is_user(owner):
+        cloud_put_entry(owner, history_dir, entry_id)
+
+    for old in history_list(history_dir)[HISTORY_MAX_ENTRIES:]:
+        history_delete_entry(history_dir, old["id"])
+
+    return entry_id
+
+
+def history_load(entry_id):
+    if not _HEX_ID.fullmatch(entry_id or ""):
+        return None, None, None
+
+    history_dir = owner_history_dir()
+
+    if not history_dir:
+        return None, None, None
+
+    meta = _read_json(
+        os.path.join(history_dir, entry_id + ".meta.json")
+    )
+
+    if not meta:
+        return None, None, None
+
+    result = _read_json(
+        os.path.join(history_dir, entry_id + ".json")
+    )
+
+    owner = os.path.basename(history_dir)
+
+    if result is None and owner_is_user(owner):
+        result = cloud_fetch_result(owner, history_dir, entry_id)
+
+    if result is None:
+        return None, None, None
+
+    return meta, result, history_dir
+
+
+def clear_history():
+    history_dir = owner_history_dir()
+
+    if not history_dir:
+        return
+
+    for meta in history_list(history_dir):
+        history_delete_entry(history_dir, meta["id"])
+
+
+def merge_guest_history(guest_id, user_owner):
+    """
+    Move a guest's analyses into the account they just signed in to,
+    so they become permanent.
+    """
+
+    if not (isinstance(guest_id, str) and _HEX_ID.fullmatch(guest_id)):
+        return
+
+    guest_dir = os.path.join(HISTORY_DIR, "g_" + guest_id)
+
+    if not os.path.isdir(guest_dir):
+        return
+
+    user_dir = os.path.join(HISTORY_DIR, user_owner)
+    os.makedirs(user_dir, exist_ok=True)
+
+    for filename in os.listdir(guest_dir):
+        if filename == MANIFEST_NAME:
+            continue
+
+        try:
+            shutil.move(
+                os.path.join(guest_dir, filename),
+                os.path.join(user_dir, filename),
+            )
+        except OSError:
+            pass
+
+    shutil.rmtree(guest_dir, ignore_errors=True)
+
+    # Uploads the moved analyses to Firestore.
+    sync_history(user_owner, user_dir, force=True)
 
 
 # ============================================================
@@ -536,9 +1243,19 @@ def firebase_session():
             }
         ), 403
 
+    guest_id = session.get("guest_id")
+
     session.clear()
 
     session["firebase_uid"] = decoded["uid"]
+
+    # Analyses made as a guest in this browser become part of the
+    # account, and so permanent.
+    if guest_id:
+        merge_guest_history(
+            guest_id,
+            current_owner(),
+        )
 
     session["email"] = decoded.get(
         "email",
@@ -592,8 +1309,8 @@ def login():
 )
 def logout():
 
-    cleanup_session_playback()
-
+    # Saved faces and analyses stay in the account; only the browser's
+    # sign-in is cleared.
     session.clear()
 
     return redirect(
@@ -988,6 +1705,14 @@ def save_reference_image(
         save_path,
     )
 
+    # Every way of saving a face (photo, camera, recording, "Save as
+    # known", guest import) ends here, so this makes them all permanent.
+    cloud_put_face(
+        face_owner(known_dir),
+        name,
+        save_path,
+    )
+
     return save_path
 
 
@@ -1224,106 +1949,186 @@ def _locate_faces_fast(rgb):
 # VIDEO SAMPLING
 # ============================================================
 
+VIDEO_FRAME_MAX_WIDTH = 960
+STREAM_TIMEOUT_MS = 30000
+
+
+def _open_video(source):
+    """
+    Open a local file or an http(s) stream URL. Streams are read
+    directly by FFmpeg; nothing is downloaded to disk.
+    """
+
+    if re.match(r"https?://", source or ""):
+        return cv2.VideoCapture(
+            source,
+            cv2.CAP_FFMPEG,
+            [
+                cv2.CAP_PROP_OPEN_TIMEOUT_MSEC,
+                STREAM_TIMEOUT_MS,
+                cv2.CAP_PROP_READ_TIMEOUT_MSEC,
+                STREAM_TIMEOUT_MS,
+            ],
+        )
+
+    return cv2.VideoCapture(source)
+
+
+def _frame_to_rgb(frame_bgr):
+    height, width = frame_bgr.shape[:2]
+
+    # Detection runs at 640px anyway; capping the size keeps memory
+    # low on small servers.
+    if width > VIDEO_FRAME_MAX_WIDTH:
+        scale = VIDEO_FRAME_MAX_WIDTH / width
+        frame_bgr = cv2.resize(
+            frame_bgr,
+            (VIDEO_FRAME_MAX_WIDTH, max(int(height * scale), 1)),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    return cv2.cvtColor(
+        frame_bgr,
+        cv2.COLOR_BGR2RGB,
+    )
+
+
+def iter_video_frames(
+    source,
+    stats,
+    target_fps=TARGET_SAMPLE_FPS,
+    max_samples=MAX_SAMPLED_FRAMES,
+    duration_hint=None,
+):
+    """
+    Yield (timestamp, rgb) samples from a video file or stream URL.
+
+    Short videos are sampled at target_fps. Longer ones get
+    max_samples frames spread evenly over the whole video (by seeking),
+    so faces late in a long video are still found.
+
+    `stats` is filled in with duration, sampled and interval.
+    """
+
+    stats.update(duration=0.0, sampled=0, interval=1.0 / target_fps)
+
+    cap = _open_video(source)
+
+    if not cap.isOpened():
+        cap.release()
+        return
+
+    try:
+        reported_fps = cap.get(cv2.CAP_PROP_FPS)
+
+        # Browser (MediaRecorder) WebM files often report 0 or 1000 fps.
+        # Treat anything implausible as unknown and fall back to 30.
+        fps_known = (
+            reported_fps == reported_fps  # not NaN
+            and 1.0 <= reported_fps <= 240.0
+        )
+
+        fps = reported_fps if fps_known else 30.0
+
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+
+        if duration_hint and duration_hint > 0:
+            duration = float(duration_hint)
+        elif fps_known and total_frames > 0:
+            duration = total_frames / fps
+        else:
+            duration = 0.0
+
+        if duration * target_fps > max_samples:
+
+            # Long video: seek to evenly spaced points.
+            interval = duration / max_samples
+            stats["interval"] = interval
+            stats["duration"] = duration
+
+            for i in range(max_samples):
+                timestamp = (i + 0.5) * interval
+
+                cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000.0)
+
+                ret, frame_bgr = cap.read()
+
+                if not ret:
+                    continue
+
+                stats["sampled"] += 1
+
+                yield timestamp, _frame_to_rgb(frame_bgr)
+
+            return
+
+        # Short (or unknown-length) video: read sequentially.
+        interval = 1.0 / target_fps
+        index = 0
+        next_sample = 0.0
+        last_timestamp = 0.0
+
+        while stats["sampled"] < max_samples:
+
+            ret, frame_bgr = cap.read()
+
+            if not ret:
+                break
+
+            # Prefer the container's own timestamp; it stays correct
+            # even when the reported frame rate is wrong.
+            position_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+
+            timestamp = (
+                position_ms / 1000.0
+                if position_ms and position_ms > 0
+                else index / fps
+            )
+
+            last_timestamp = max(last_timestamp, timestamp)
+            stats["duration"] = max(duration, last_timestamp)
+
+            if timestamp >= next_sample:
+
+                while next_sample <= timestamp:
+                    next_sample += interval
+
+                stats["sampled"] += 1
+
+                yield timestamp, _frame_to_rgb(frame_bgr)
+
+            index += 1
+
+    finally:
+        cap.release()
+
+
 def sample_video_frames(
     path,
     target_fps=TARGET_SAMPLE_FPS,
     max_samples=MAX_SAMPLED_FRAMES,
 ):
+    """
+    List version of iter_video_frames, for short clips.
+    Returns (frames, duration, interval, sampled).
+    """
 
-    cap = cv2.VideoCapture(
-        path
-    )
+    stats = {}
 
-    if not cap.isOpened():
-        return [], 0.0, 0.0, 0
-
-    reported_fps = cap.get(
-        cv2.CAP_PROP_FPS
-    )
-
-    # Browser (MediaRecorder) WebM files often report 0 or 1000 fps.
-    # Treat anything implausible as unknown and fall back to 30.
-    fps_known = (
-        reported_fps == reported_fps  # not NaN
-        and 1.0 <= reported_fps <= 240.0
-    )
-
-    fps = reported_fps if fps_known else 30.0
-
-    total_frames = int(
-        cap.get(
-            cv2.CAP_PROP_FRAME_COUNT
+    frames = list(
+        iter_video_frames(
+            path,
+            stats,
+            target_fps=target_fps,
+            max_samples=max_samples,
         )
     )
-
-    interval = 1.0 / target_fps
-
-    frames = []
-    index = 0
-    next_sample = 0.0
-    last_timestamp = 0.0
-
-    while True:
-
-        ret, frame_bgr = cap.read()
-
-        if not ret:
-            break
-
-        # Prefer the container's own timestamp; it stays correct
-        # even when the reported frame rate is wrong.
-        position_ms = cap.get(
-            cv2.CAP_PROP_POS_MSEC
-        )
-
-        timestamp = (
-            position_ms / 1000.0
-            if position_ms and position_ms > 0
-            else index / fps
-        )
-
-        last_timestamp = max(
-            last_timestamp,
-            timestamp,
-        )
-
-        if timestamp >= next_sample:
-
-            rgb = cv2.cvtColor(
-                frame_bgr,
-                cv2.COLOR_BGR2RGB,
-            )
-
-            frames.append(
-                (
-                    timestamp,
-                    rgb,
-                )
-            )
-
-            while next_sample <= timestamp:
-                next_sample += interval
-
-            if len(frames) >= max_samples:
-                break
-
-        index += 1
-
-    cap.release()
-
-    if fps_known and total_frames > 0:
-        duration = max(
-            total_frames / fps,
-            last_timestamp,
-        )
-    else:
-        duration = last_timestamp
 
     return (
         frames,
-        duration,
-        fps,
-        total_frames,
+        stats["duration"],
+        stats["interval"],
+        stats["sampled"],
     )
 
 
@@ -1549,7 +2354,14 @@ def analyze_frames(
 
     best_frame = None
 
+    # `frames` may be a generator (streamed video), so remember the
+    # first frame for the no-faces preview instead of indexing later.
+    first_rgb = None
+
     for timestamp, rgb in frames:
+
+        if first_rgb is None:
+            first_rgb = rgb
 
         locations = _locate_faces_fast(
             rgb
@@ -1660,10 +2472,10 @@ def analyze_frames(
             best_frame[3],
         )
 
-    elif frames:
+    elif first_rgb is not None:
 
         preview = Image.fromarray(
-            frames[0][1]
+            first_rgb
         )
 
     return (
@@ -1734,7 +2546,14 @@ def _best_reference_frame(frames):
 # FINALIZE PERSONS
 # ============================================================
 
-def finalize_persons(persons):
+def finalize_persons(
+    persons,
+    sample_interval=1.0 / TARGET_SAMPLE_FPS,
+):
+
+    # Samples closer than this belong to one continuous appearance.
+    # Long videos are sampled more sparsely, so the gap scales with it.
+    gap = max(1.6, sample_interval * 2.2)
 
     result = []
 
@@ -1744,7 +2563,8 @@ def finalize_persons(persons):
             person.get(
                 "timestamps",
                 [],
-            )
+            ),
+            gap=gap,
         )
 
         for item in timeline:
@@ -1808,48 +2628,27 @@ def finalize_persons(persons):
 # GOOGLE DRIVE
 # ============================================================
 
-def resolve_drive_link(url):
+def drive_file_id(url):
+    """
+    Extract the file id from a Google Drive share link, or None.
+    """
 
-    url = url.strip()
-
-    parsed = urlparse(url)
+    parsed = urlparse(url.strip())
 
     match = re.search(
-        r"/file/d/([^/]+)",
+        r"/file/d/([A-Za-z0-9_-]+)",
         parsed.path,
     )
 
     if match:
+        return match.group(1)
 
-        file_id = match.group(1)
+    file_ids = parse_qs(parsed.query).get("id")
 
-        return (
-            "https://drive.google.com/"
-            "uc?export=download&id="
-            + file_id
-        )
+    if file_ids and re.fullmatch(r"[A-Za-z0-9_-]+", file_ids[0]):
+        return file_ids[0]
 
-    query = parse_qs(
-        parsed.query
-    )
-
-    file_ids = query.get(
-        "id"
-    )
-
-    if (
-        "drive.google.com"
-        in parsed.netloc.lower()
-        and file_ids
-    ):
-
-        return (
-            "https://drive.google.com/"
-            "uc?export=download&id="
-            + file_ids[0]
-        )
-
-    return url
+    return None
 
 
 # ============================================================
@@ -2026,163 +2825,142 @@ def _extension_from_response(
 
 
 # ============================================================
-# GOOGLE DRIVE DOWNLOAD
+# LINKS: STREAM VIDEOS, FETCH PHOTOS
 # ============================================================
+#
+# Videos from links are never downloaded. The server reads the stream
+# directly while analysing, and the browser plays the original source
+# (YouTube's own player, or the original URL). Only photos are fetched,
+# into the request's temp folder, and deleted after analysis.
 
-def _drive_download(
-    url,
-    dest_dir,
-):
+def _filename_from_response(response):
+    disposition = response.headers.get("Content-Disposition", "")
 
-    direct_url = resolve_drive_link(
-        url
+    match = re.search(
+        r"filename\*?=(?:UTF-8'')?\"?([^\";]+)",
+        disposition,
     )
 
-    client = requests.Session()
+    return match.group(1).strip() if match else ""
 
-    response = _safe_get(
-        client,
-        direct_url,
-    )
 
-    content_type = (
-        response.headers
-        .get(
-            "Content-Type",
-            "",
-        )
-        .lower()
-    )
+def _link_title(url, response=None):
+    name = _filename_from_response(response) if response is not None else ""
 
-    if "text/html" in content_type:
+    if not name:
+        parsed = urlparse(url)
+        name = os.path.basename(parsed.path) or parsed.hostname or url
 
-        html = response.text
+    return name[:120]
 
-        confirm_match = re.search(
-            r"confirm=([^&\"']+)",
-            html,
-        )
 
-        if confirm_match:
+def _media_from_response(response, url, dest_dir, kind, playback_url, title):
+    """
+    Turn a successful GET into a link result: videos become a stream
+    (the body is not read), photos are saved to dest_dir.
+    """
 
-            token = confirm_match.group(
-                1
-            )
-
-            parsed = urlparse(
-                direct_url
-            )
-
-            query = parse_qs(
-                parsed.query
-            )
-
-            file_ids = query.get(
-                "id"
-            )
-
-            if file_ids:
-
-                direct_url = (
-                    "https://drive.usercontent.google.com/"
-                    "download?id="
-                    + file_ids[0]
-                    + "&confirm="
-                    + token
-                )
-
-                response = _safe_get(
-                    client,
-                    direct_url,
-                )
-
-                content_type = (
-                    response.headers
-                    .get(
-                        "Content-Type",
-                        "",
-                    )
-                    .lower()
-                )
-
-        if "text/html" in content_type:
-
-            raise ValueError(
-                "Google Drive did not return "
-                "the media file. Make sure "
-                "the file is publicly accessible."
-            )
-
-    extension = _extension_from_response(
-        response,
-        url,
-    )
+    extension = _extension_from_response(response, response.url or url)
 
     if not extension:
+        filename = _filename_from_response(response)
+        candidate = os.path.splitext(filename)[1].lower()
+
+        if candidate.lstrip(".") in ALLOWED_EXT:
+            extension = candidate
+
+    if not extension:
+        response.close()
 
         raise ValueError(
-            "Couldn't determine whether the "
-            "Google Drive file is a supported "
+            "Couldn't determine whether that link is a supported "
             "photo or video."
         )
 
+    if extension.lstrip(".") in VIDEO_EXT:
+        response.close()
+
+        return {
+            "media_type": "video",
+            "stream_url": response.url or url,
+            "duration_hint": None,
+            "kind": kind,
+            "title": title,
+            "playback": {
+                "type": "remote",
+                "url": playback_url,
+            },
+        }
+
     path = os.path.join(
         dest_dir,
-        "drive_download"
-        + extension,
+        "link_photo" + extension,
     )
 
-    return _write_response_to_file(
-        response,
-        path,
-    )
+    _write_response_to_file(response, path)
+
+    return {
+        "media_type": "image",
+        "path": path,
+        "kind": kind,
+        "title": title,
+        "playback": None,
+    }
 
 
-# ============================================================
-# DIRECT URL DOWNLOAD
-# ============================================================
+def resolve_drive_link(url, dest_dir):
+    file_id = drive_file_id(url)
 
-def download_from_url(
-    url,
-    dest_dir,
-):
-
-    url = url.strip()
-
-    if is_google_drive_url(url):
-
-        return _drive_download(
-            url,
-            dest_dir,
+    if not file_id:
+        raise ValueError(
+            "Couldn't find the file in that Google Drive link."
         )
 
-    response = _safe_get(
-        requests.Session(),
-        url,
+    # confirm=t skips Drive's "can't scan for viruses" page for large files.
+    direct_url = (
+        "https://drive.usercontent.google.com/download"
+        f"?id={file_id}&export=download&confirm=t"
     )
 
-    extension = _extension_from_response(
-        response,
-        url,
-    )
+    response = _safe_get(requests.Session(), direct_url)
 
-    if not extension:
+    if "text/html" in response.headers.get("Content-Type", "").lower():
+        response.close()
 
         raise ValueError(
-            "Couldn't determine whether "
-            "that link is a supported "
-            "photo or video."
+            "Google Drive did not return the media file. Make sure "
+            "the file is shared as 'Anyone with the link'."
         )
 
-    path = os.path.join(
+    result = _media_from_response(
+        response,
+        url,
         dest_dir,
-        "link_download"
-        + extension,
+        kind="drive",
+        playback_url=direct_url,
+        title=_filename_from_response(response) or "Google Drive file",
     )
 
-    return _write_response_to_file(
+    if result["playback"]:
+        # If the browser can't play Drive's file directly, the page
+        # falls back to Drive's own player.
+        result["playback"]["embed_url"] = (
+            f"https://drive.google.com/file/d/{file_id}/preview"
+        )
+
+    return result
+
+
+def resolve_direct_link(url, dest_dir):
+    response = _safe_get(requests.Session(), url)
+
+    return _media_from_response(
         response,
-        path,
+        url,
+        dest_dir,
+        kind="link",
+        playback_url=url,
+        title=_link_title(url, response),
     )
 
 
@@ -2190,233 +2968,160 @@ def download_from_url(
 # YOUTUBE
 # ============================================================
 
-def download_youtube_video(
-    url,
-    dest_dir,
-):
+# Video-only, <=480p is plenty for face detection and fast to stream.
+# H.264 (avc1) first because OpenCV's FFmpeg decodes it everywhere.
+YOUTUBE_ANALYSIS_FORMAT = (
+    "bestvideo[height<=480][vcodec^=avc1]/"
+    "best[height<=480][vcodec^=avc1]/"
+    "bestvideo[height<=480]/"
+    "best[height<=480]/"
+    "best"
+)
 
-    if yt_dlp is None:
-        raise RuntimeError(
-            "yt-dlp is not installed on the server."
-        )
 
-    os.makedirs(
-        dest_dir,
-        exist_ok=True,
-    )
-
-    output_template = os.path.join(
-        dest_dir,
-        "youtube_%(id)s.%(ext)s",
-    )
-
-    ffmpeg_path = (
-        shutil.which("ffmpeg")
-        or "/usr/bin/ffmpeg"
-    )
-
-    ydl_options = {
-        "format": (
-            "bestvideo[ext=mp4][height<=720]"
-            "+bestaudio[ext=m4a]/"
-            "best[ext=mp4][height<=720]/"
-            "best"
-        ),
-
-        "outtmpl": output_template,
-
-        "merge_output_format": "mp4",
-
+def _youtube_options(work_dir):
+    options = {
+        "format": YOUTUBE_ANALYSIS_FORMAT,
         "noplaylist": True,
-
         "quiet": True,
         "no_warnings": True,
-
         "retries": 3,
-        "fragment_retries": 3,
-
         "socket_timeout": 30,
-
-        "max_filesize": MAX_DOWNLOAD_BYTES,
-
         "http_headers": DOWNLOAD_HEADERS,
-
-        "ffmpeg_location": ffmpeg_path,
-
-        # Let yt-dlp use its current YouTube
-        # client selection instead of forcing
-        # old TV / Safari / Android clients.
     }
 
-    try:
+    # YouTube blocks most datacenter IPs (Render included) with a
+    # "confirm you're not a bot" check. Optional workarounds:
+    #   YTDLP_COOKIES_FILE  - Netscape cookies.txt from a signed-in
+    #                         account (on Render: a Secret File, found
+    #                         automatically at /etc/secrets/youtube_cookies.txt)
+    #   YTDLP_PROXY         - e.g. http://user:pass@host:port
+    cookies_source = os.environ.get(
+        "YTDLP_COOKIES_FILE",
+        "/etc/secrets/youtube_cookies.txt",
+    )
 
-        with yt_dlp.YoutubeDL(
-            ydl_options
-        ) as ydl:
-
-            info = ydl.extract_info(
-                url,
-                download=True,
-            )
-
-            requested_downloads = (
-                info.get(
-                    "requested_downloads"
-                )
-                or []
-            )
-
-            candidate_paths = []
-
-            for item in requested_downloads:
-
-                filepath = item.get(
-                    "filepath"
-                )
-
-                if filepath:
-                    candidate_paths.append(
-                        filepath
-                    )
-
-            prepared_filename = (
-                ydl.prepare_filename(info)
-            )
-
-            candidate_paths.append(
-                prepared_filename
-            )
-
-            base_path = os.path.splitext(
-                prepared_filename
-            )[0]
-
-            for extension in (
-                ".mp4",
-                ".mkv",
-                ".webm",
-                ".mov",
-            ):
-
-                candidate_paths.append(
-                    base_path + extension
-                )
-
-            for candidate in candidate_paths:
-
-                if (
-                    candidate
-                    and os.path.exists(candidate)
-                    and os.path.getsize(candidate) > 0
-                ):
-
-                    return candidate
-
-            videos = []
-
-            for filename in os.listdir(
-                dest_dir
-            ):
-
-                if filename.lower().endswith(
-                    tuple(
-                        "." + ext
-                        for ext in VIDEO_EXT
-                    )
-                ):
-
-                    path = os.path.join(
-                        dest_dir,
-                        filename,
-                    )
-
-                    if os.path.isfile(path):
-                        videos.append(path)
-
-            if videos:
-
-                videos.sort(
-                    key=os.path.getmtime,
-                    reverse=True,
-                )
-
-                return videos[0]
-
-            raise RuntimeError(
-                "yt-dlp completed but no "
-                "video file was produced."
-            )
-
-    except Exception as exc:
-
-        message = str(exc)
-        message_lower = message.lower()
-
-        print(
-            "YouTube download failed:",
-            message,
+    if cookies_source and os.path.isfile(cookies_source):
+        # yt-dlp rewrites the cookie file when it finishes, and Render
+        # secret files are read-only, so work on a private copy.
+        cookies_copy = os.path.join(
+            work_dir,
+            "youtube_cookies.txt",
         )
 
-        if "429" in message:
-            raise RuntimeError(
-                "YouTube temporarily rate-limited "
-                "the server. Please try again later."
-            ) from exc
+        shutil.copyfile(cookies_source, cookies_copy)
 
-        if (
-            "not a bot" in message_lower
-            or "automated traffic" in message_lower
-            or "sign in to confirm" in message_lower
-            or "confirm you’re not a bot" in message_lower
-            or "confirm you're not a bot" in message_lower
-        ):
-            raise RuntimeError(
-                "YouTube is blocking automated downloads "
-                "from this server. Try another video or "
-                "upload the video directly from your device."
-            ) from exc
+        options["cookiefile"] = cookies_copy
 
-        if "private video" in message_lower:
-            raise RuntimeError(
-                "This is a private YouTube video."
-            ) from exc
+    proxy = os.environ.get("YTDLP_PROXY", "").strip()
 
-        if (
-            "video unavailable" in message_lower
-            or "this video is unavailable" in message_lower
-        ):
-            raise RuntimeError(
-                "This YouTube video is unavailable."
-            ) from exc
+    if proxy:
+        options["proxy"] = proxy
 
+    return options
+
+
+def _youtube_error(exc):
+    message = str(exc)
+    message_lower = message.lower()
+
+    print("YouTube lookup failed:", message)
+
+    if "429" in message:
+        return RuntimeError(
+            "YouTube temporarily rate-limited the server. "
+            "Please try again later."
+        )
+
+    if (
+        "not a bot" in message_lower
+        or "not a bot" in message_lower.replace("’", "'")
+        or "automated traffic" in message_lower
+        or "sign in to confirm" in message_lower
+    ):
+        return RuntimeError(
+            "YouTube is blocking this server from reading videos. "
+            "Upload the video from your device instead, or set up "
+            "YouTube cookies on the server (see README)."
+        )
+
+    if "private video" in message_lower:
+        return RuntimeError("This is a private YouTube video.")
+
+    if (
+        "video unavailable" in message_lower
+        or "this video is unavailable" in message_lower
+    ):
+        return RuntimeError("This YouTube video is unavailable.")
+
+    return RuntimeError(f"Couldn't read the YouTube video: {message}")
+
+
+def resolve_youtube_link(url, work_dir):
+    if yt_dlp is None:
+        raise RuntimeError("yt-dlp is not installed on the server.")
+
+    try:
+        with yt_dlp.YoutubeDL(_youtube_options(work_dir)) as ydl:
+            info = ydl.extract_info(url, download=False)
+    except Exception as exc:
+        raise _youtube_error(exc) from exc
+
+    if info.get("_type") == "playlist" or info.get("entries"):
+        raise ValueError(
+            "Paste a link to a single YouTube video, not a playlist."
+        )
+
+    if info.get("is_live"):
+        raise ValueError("Live streams aren't supported.")
+
+    stream_url = info.get("url")
+
+    if not stream_url:
+        for item in info.get("requested_formats") or []:
+            if item.get("vcodec") not in (None, "none") and item.get("url"):
+                stream_url = item["url"]
+                break
+
+    video_id = info.get("id", "")
+
+    if not stream_url or not re.fullmatch(r"[A-Za-z0-9_-]{6,20}", video_id):
         raise RuntimeError(
-            f"Couldn't download the YouTube video: {message}"
-        ) from exc
+            "Couldn't find a playable stream for that YouTube video."
+        )
+
+    return {
+        "media_type": "video",
+        "stream_url": stream_url,
+        "duration_hint": info.get("duration"),
+        "kind": "youtube",
+        "title": (info.get("title") or "YouTube video")[:120],
+        "playback": {
+            "type": "youtube",
+            "video_id": video_id,
+        },
+    }
 
 
-def download_media_from_link(
-    url,
-    dest_dir,
-):
+def resolve_link(url, work_dir):
+    """
+    Work out what a pasted link is. Returns a dict with media_type
+    ("video" with a stream_url, or "image" with a local path), a title,
+    a kind (youtube/drive/link) and how the browser should play it.
+    """
 
     url = url.strip()
 
     if not url:
-        raise ValueError(
-            "Please provide a link."
-        )
+        raise ValueError("Please provide a link.")
 
     if is_youtube_url(url):
+        return resolve_youtube_link(url, work_dir)
 
-        return download_youtube_video(
-            url,
-            dest_dir,
-        )
+    if is_google_drive_url(url):
+        return resolve_drive_link(url, work_dir)
 
-    return download_from_url(
-        url,
-        dest_dir,
-    )
+    return resolve_direct_link(url, work_dir)
 
 
 # ============================================================
@@ -2459,8 +3164,17 @@ def known_face_image(name):
 # HOME
 # ============================================================
 
-@app.route("/")
-def index():
+app.jinja_env.filters["timestamp"] = format_timestamp
+
+
+def render_home(
+    result=None,
+    entry=None,
+):
+    """
+    Render the main page, with the session folder and optionally one
+    result (and its player) open.
+    """
 
     user = current_user()
 
@@ -2477,7 +3191,18 @@ def index():
             if user
             else []
         ),
+        history=history_list(
+            owner_history_dir()
+        ),
+        entry=entry,
+        result=result,
     )
+
+
+@app.route("/")
+def index():
+
+    return render_home()
 
 
 # ============================================================
@@ -2560,17 +3285,13 @@ def add_known():
             (
                 frames,
                 duration,
-                _fps,
-                _total,
+                sample_interval,
+                sampled_frames,
             ) = sample_video_frames(
                 temp_path
             )
 
             media_type = "video"
-
-            sampled_frames = len(
-                frames
-            )
 
         else:
 
@@ -2588,6 +3309,7 @@ def add_known():
             media_type = "image"
             duration = None
             sampled_frames = None
+            sample_interval = None
 
         if not frames:
 
@@ -2630,10 +3352,9 @@ def add_known():
                 total_detections,
                 preview,
                 media_type,
-                temp_path,
                 sampled_frames=sampled_frames,
                 duration=duration,
-                enable_playback=False,
+                sample_interval=sample_interval,
             )
 
             flash(
@@ -2643,13 +3364,7 @@ def add_known():
                 "success",
             )
 
-            return render_template(
-                "index.html",
-                app_name=APP_NAME,
-                user=user,
-                known_people=list_known_people(
-                    known_dir
-                ),
+            return render_home(
                 result=result,
             )
 
@@ -2914,6 +3629,12 @@ def remove_known(name):
                 )
             )
 
+            cloud_delete_face(
+                face_owner(known_dir),
+                name,
+                known_dir,
+            )
+
             flash(
                 f"Removed '{name}'.",
                 "success",
@@ -2953,60 +3674,18 @@ def finalize_analysis_result(
     total_detections,
     preview,
     media_type,
-    upload_path,
     sampled_frames=None,
     duration=None,
-    enable_playback=True,
+    sample_interval=None,
 ):
 
     persons = finalize_persons(
-        persons_raw
+        persons_raw,
+        sample_interval or 1.0 / TARGET_SAMPLE_FPS,
     )
-
-    video_url = None
-
-    if (
-        media_type == "video"
-        and enable_playback
-    ):
-
-        media_filename = os.path.basename(
-            upload_path
-        )
-
-        token = uuid.uuid4().hex
-
-        playback_path = os.path.join(
-            PLAYBACK_DIR,
-            f"{token}.{ext_of(media_filename)}",
-        )
-
-        try:
-
-            shutil.move(
-                upload_path,
-                playback_path,
-            )
-
-            session["playback"] = {
-                "token": token,
-                "path": playback_path,
-                "mimetype": guess_video_mimetype(
-                    media_filename
-                ),
-            }
-
-            video_url = url_for(
-                "serve_playback",
-                token=token,
-            )
-
-        except OSError:
-            video_url = None
 
     return {
         "media_type": media_type,
-        "video_url": video_url,
         "preview_image": (
             image_to_base64(
                 _shrink_preview(preview),
@@ -3038,6 +3717,13 @@ def finalize_analysis_result(
         "sampled_frames": (
             sampled_frames
             if media_type == "video"
+            else None
+        ),
+        # Spacing between analysed frames; the player uses it to decide
+        # how close to a detection still counts as "on screen".
+        "sample_interval": (
+            round(sample_interval, 3)
+            if media_type == "video" and sample_interval
             else None
         ),
     }
@@ -3273,8 +3959,7 @@ def import_known():
 )
 def analyze():
 
-    cleanup_session_playback()
-    purge_old_playback()
+    purge_old_history()
 
     guest_known_dir = None
 
@@ -3287,11 +3972,8 @@ def analyze():
         "",
     ).strip()
 
-    upload_path = None
-
     # Every request works in its own folder, so concurrent uploads
-    # with the same name (e.g. camera-photo.jpg) can't collide and
-    # the YouTube fallback only ever sees this request's download.
+    # with the same name (e.g. camera-photo.jpg) can't collide.
     request_dir = tempfile.mkdtemp(
         prefix="analyze_",
         dir=UPLOADS_DIR,
@@ -3319,25 +4001,12 @@ def analyze():
                     url_for("index")
                 )
 
-            original_extension = ext_of(
-                file.filename
-            )
-
-            original_name = os.path.splitext(
-                file.filename
-            )[0]
-
             filename = (
                 safe_name(
-                    original_name
+                    os.path.splitext(file.filename)[0]
                 )
                 or "upload"
-            )
-
-            filename += (
-                "."
-                + original_extension
-            )
+            ) + "." + ext_of(file.filename)
 
             upload_path = os.path.join(
                 request_dir,
@@ -3348,25 +4017,39 @@ def analyze():
                 upload_path
             )
 
+            media = {
+                "media_type": (
+                    "video"
+                    if is_video_file(filename)
+                    else "image"
+                ),
+                "path": upload_path,
+                "stream_url": upload_path,
+                "duration_hint": None,
+                "kind": "upload",
+                "title": file.filename[:120],
+                "playback": None,
+            }
+
+            source_url = None
+
         # ----------------------------------------------------
-        # LINK
+        # LINK (videos are streamed, never downloaded)
         # ----------------------------------------------------
 
         elif url:
 
             try:
 
-                upload_path = (
-                    download_media_from_link(
-                        url,
-                        request_dir,
-                    )
+                media = resolve_link(
+                    url,
+                    request_dir,
                 )
 
             except Exception as exc:
 
                 flash(
-                    f"Couldn't fetch that link: {exc}",
+                    f"Couldn't open that link: {exc}",
                     "error",
                 )
 
@@ -3374,29 +4057,7 @@ def analyze():
                     url_for("index")
                 )
 
-            if not allowed_file(
-                os.path.basename(
-                    upload_path
-                )
-            ):
-
-                if os.path.exists(
-                    upload_path
-                ):
-
-                    os.remove(
-                        upload_path
-                    )
-
-                flash(
-                    "That link did not produce "
-                    "a supported photo or video.",
-                    "error",
-                )
-
-                return redirect(
-                    url_for("index")
-                )
+            source_url = url
 
         # ----------------------------------------------------
         # NOTHING PROVIDED
@@ -3433,71 +4094,34 @@ def analyze():
                 guest_known_dir,
             ) = load_guest_known_faces_from_request()
 
-        media_filename = os.path.basename(
-            upload_path
-        )
-
-        media_type = (
-            "video"
-            if is_video_file(
-                media_filename
-            )
-            else "image"
-        )
-
-        # ----------------------------------------------------
-        # IMAGE
-        # ----------------------------------------------------
-
-        if media_type == "image":
-
-            rgb = load_rgb_image(
-                upload_path
-            )
-
-            frames = [
-                (
-                    0.0,
-                    rgb,
-                )
-            ]
-
-            duration = None
-            sampled_frames = 1
-
-        # ----------------------------------------------------
-        # VIDEO
-        # ----------------------------------------------------
-
-        else:
-
-            (
-                frames,
-                duration,
-                _fps,
-                _total_frames,
-            ) = sample_video_frames(
-                upload_path
-            )
-
-            if not frames:
-
-                flash(
-                    "Couldn't read that video.",
-                    "error",
-                )
-
-                return redirect(
-                    url_for("index")
-                )
-
-            sampled_frames = len(
-                frames
-            )
+        media_type = media["media_type"]
 
         # ----------------------------------------------------
         # ANALYSIS
         # ----------------------------------------------------
+
+        stats = {}
+
+        if media_type == "image":
+
+            frames = [
+                (
+                    0.0,
+                    load_rgb_image(
+                        media["path"]
+                    ),
+                )
+            ]
+
+        else:
+
+            # A generator: frames are analysed as they are read, so
+            # a streamed video is never held in memory or on disk.
+            frames = iter_video_frames(
+                media["stream_url"],
+                stats,
+                duration_hint=media.get("duration_hint"),
+            )
 
         (
             persons_raw,
@@ -3509,40 +4133,57 @@ def analyze():
             known_names,
         )
 
+        if media_type == "video" and not stats.get("sampled"):
+
+            flash(
+                "Couldn't read that video.",
+                "error",
+            )
+
+            return redirect(
+                url_for("index")
+            )
+
         result = finalize_analysis_result(
             persons_raw,
             total_detections,
             preview,
             media_type,
-            upload_path,
-            sampled_frames=(
-                sampled_frames
-                if media_type == "video"
-                else None
-            ),
-            duration=(
-                duration
-                if media_type == "video"
+            sampled_frames=stats.get("sampled"),
+            duration=stats.get("duration"),
+            sample_interval=stats.get("interval"),
+        )
+
+        # ----------------------------------------------------
+        # SAVE TO THE SESSION FOLDER
+        # ----------------------------------------------------
+
+        entry_id = history_add(
+            {
+                "title": media["title"],
+                "kind": media["kind"],
+                "source_url": source_url,
+                "media_type": media_type,
+                "playback": media["playback"],
+            },
+            result,
+            preview,
+            # Uploaded videos are kept (in the session folder only) so
+            # they can be played back; links play from their source.
+            video_path=(
+                media["path"]
+                if media["kind"] == "upload"
+                and media_type == "video"
                 else None
             ),
         )
 
-        user = current_user()
-
-        return render_template(
-            "index.html",
-            app_name=APP_NAME,
-            user=user,
-            known_people=(
-                list_known_people(
-                    user_known_faces_dir(
-                        user["uid"]
-                    )
-                )
-                if user
-                else []
-            ),
-            result=result,
+        # Redirect so refreshing the page doesn't re-submit the form.
+        return redirect(
+            url_for(
+                "history_entry",
+                entry_id=entry_id,
+            )
         )
 
     except Exception as exc:
@@ -3562,8 +4203,6 @@ def analyze():
 
     finally:
 
-        # A playable video has already been moved to PLAYBACK_DIR,
-        # so everything left in request_dir is temporary.
         shutil.rmtree(
             request_dir,
             ignore_errors=True,
@@ -3580,6 +4219,99 @@ def analyze():
                 guest_known_dir,
                 ignore_errors=True,
             )
+
+
+# ============================================================
+# ANALYSIS FOLDER ROUTES
+# ============================================================
+
+@app.route("/history/<entry_id>")
+def history_entry(entry_id):
+
+    meta, result, history_dir = history_load(entry_id)
+
+    if meta is None:
+
+        flash(
+            "That analysis is no longer available.",
+            "error",
+        )
+
+        return redirect(
+            url_for("index")
+        )
+
+    playback = meta.get("playback") or {}
+
+    # Uploaded videos live on the server's disk, which Render clears
+    # on restart; the results and faces are still kept.
+    meta["video_missing"] = (
+        playback.get("type") == "file"
+        and not os.path.isfile(
+            os.path.join(
+                history_dir,
+                os.path.basename(playback.get("file", "")),
+            )
+        )
+    )
+
+    return render_home(
+        result=result,
+        entry=meta,
+    )
+
+
+@app.route("/history/<entry_id>/thumb.jpg")
+def history_thumb(entry_id):
+
+    history_dir = owner_history_dir()
+
+    path = (
+        os.path.join(history_dir, entry_id + ".jpg")
+        if history_dir and _HEX_ID.fullmatch(entry_id)
+        else None
+    )
+
+    if not path or not os.path.isfile(path):
+        abort(404)
+
+    return send_file(
+        path,
+        mimetype="image/jpeg",
+        max_age=3600,
+    )
+
+
+@app.route(
+    "/history/<entry_id>/delete",
+    methods=["POST"],
+)
+def history_delete(entry_id):
+
+    history_dir = owner_history_dir()
+
+    if history_dir and _HEX_ID.fullmatch(entry_id):
+        history_delete_entry(
+            history_dir,
+            entry_id,
+        )
+
+    return redirect(
+        url_for("index")
+    )
+
+
+@app.route(
+    "/history/clear",
+    methods=["POST"],
+)
+def history_clear():
+
+    clear_history()
+
+    return redirect(
+        url_for("index")
+    )
 
 
 # ============================================================
@@ -3609,51 +4341,34 @@ def service_worker():
 
 
 # ============================================================
-# SERVE TEMPORARY VIDEO PLAYBACK
+# SERVE UPLOADED VIDEOS FOR PLAYBACK
 # ============================================================
 
-@app.route("/media/<token>")
-def serve_playback(token):
+@app.route("/media/<entry_id>")
+def serve_playback(entry_id):
     """
-    Serve temporary video playback by token.
-
-    The token maps directly to a file inside PLAYBACK_DIR.
-    This does not depend on the Flask session.
+    Stream an uploaded video back for playback. Only its owner (the
+    signed-in account, or the guest browser) can open it.
     """
 
-    if not token or not re.fullmatch(
-        r"[a-fA-F0-9]{32}",
-        token,
-    ):
+    meta, _result, history_dir = history_load(entry_id)
+
+    playback = (meta or {}).get("playback") or {}
+
+    if playback.get("type") != "file":
         abort(404)
 
-    matching_path = None
+    path = os.path.join(
+        history_dir,
+        os.path.basename(playback["file"]),
+    )
 
-    for extension in (
-        ".mp4",
-        ".webm",
-        ".mov",
-        ".avi",
-        ".mkv",
-        ".m4v",
-    ):
-        candidate = os.path.join(
-            PLAYBACK_DIR,
-            f"{token}{extension}",
-        )
-
-        if os.path.isfile(candidate):
-            matching_path = candidate
-            break
-
-    if not matching_path:
+    if not os.path.isfile(path):
         abort(404)
 
     return send_file(
-        matching_path,
-        mimetype=guess_video_mimetype(
-            matching_path
-        ),
+        path,
+        mimetype=guess_video_mimetype(path),
         conditional=True,
     )
 

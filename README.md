@@ -2,6 +2,24 @@
 
 FaceTally detects, recognizes, and counts faces in photos and videos.
 
+## Videos, links and saved analyses
+
+- **Links are never downloaded.** For a pasted video link (YouTube, Google Drive or a direct video URL) the server reads the video stream directly while analysing it; nothing is saved to disk. Photos from links are fetched temporarily and deleted after analysis.
+- **"Your analyses" folder.** Every analysis is saved as a card (preview, source URL, people/known/unknown counts, known names, date). Clicking a card reopens its results and faces instantly without re-analysing; **Open video** then loads the player. Cards can be deleted individually or all at once. Signed-in users keep up to 50 analyses permanently; guests' analyses are kept in their browser for 30 days and move into their account when they sign in.
+- **Playback uses the original source.** YouTube videos play in YouTube's embedded player, other links from their original URL (Drive falls back to Drive's own player if needed). Uploaded videos play from the server copy; on Render without a persistent disk that file is lost on restart, but the analysis itself is kept.
+- **Timeline tracing.** Each person has a bar over the whole video showing when they appear. While the video plays, a playhead moves along every bar, the current appearance lights up, people on screen are highlighted, and an "On screen at …" line names them. Clicking a time or a bar segment jumps there and plays.
+- **Long videos** are sampled with 120 frames spread across the whole video, so late appearances are found too.
+
+## Permanent storage (Firestore)
+
+Render's disk is wiped on every deploy and restart unless a paid disk is attached, so signed-in users' **saved faces** (however they were saved: photo, camera, recording, "Save as known", guest import) and **analyses** are stored in **Cloud Firestore**, which is free on the Spark plan. The server's disk is only a cache that is refilled from Firestore after a restart; faces that existed on disk before Firestore was enabled are uploaded automatically.
+
+To enable it: Firebase console → your project → **Build → Firestore Database → Create database** → Production mode → choose a location. Nothing else is needed; the server uses the same Firebase Admin credentials and picks the database up within 5 minutes (or on restart). Production-mode security rules are fine because only the server (Admin SDK) accesses it.
+
+Without Firestore, everything still works but is stored on local disk only.
+
+`FACETALLY_SECRET_KEY` must be set in production: the sign-in and guest cookies are signed with it and last a year, so a changing key would log everyone out and detach guests from their saved analyses.
+
 ## Authentication and saved faces
 
 FaceTally now uses **Firebase Authentication** for persistent accounts while keeping the main app usable without login.
@@ -122,6 +140,13 @@ docker run --rm -p 10000:10000 --env-file .env.local \
 (Drop the service-account mount if you configure Firebase Admin through `FIREBASE_SERVICE_ACCOUNT_JSON` or the individual `FIREBASE_*` variables instead.)
 
 The app runs at http://localhost:10000. The Dockerfile installs the face-recognition/dlib runtime and runs the Flask app with Gunicorn. Secrets are excluded from the image by `.dockerignore`, so pass them with `--env-file` locally and as environment variables on Render.
+
+## YouTube links on Render
+
+YouTube blocks most cloud-server IPs (Render included) with a "confirm you're not a bot" check. This applies even though FaceTally only *reads* the stream for analysis and never downloads it, so YouTube links fail on Render by default (playback in the browser is unaffected). On a home connection, e.g. running locally, they work without setup. Uploading the video file always works. To enable YouTube analysis on Render, configure one of:
+
+- **Cookies:** export `cookies.txt` (Netscape format) from a browser signed in to YouTube and add it on Render as a **Secret File** named `youtube_cookies.txt`; it is used automatically. Elsewhere, set `YTDLP_COOKIES_FILE` to its path. Use a spare Google account, since YouTube may restrict accounts used for automated downloads, and re-export the cookies when they expire.
+- **Proxy:** set `YTDLP_PROXY=http://user:pass@host:port`, ideally a residential proxy.
 
 ## Security notes
 

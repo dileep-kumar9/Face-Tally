@@ -24,3 +24,4 @@ Thumbs.db
 !.env.example
 node_modules/
 firebase-service-account.json
+youtube_cookies.txt
