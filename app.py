@@ -2342,30 +2342,37 @@ def _match_or_create_unknown(
 # ANALYZE FRAMES
 # ============================================================
 
-def analyze_frames(
-    frames,
-    known_encodings,
-    known_names,
-):
+class FrameAnalyzer:
+    """
+    Detects, recognises and clusters faces one frame at a time.
 
-    persons = OrderedDict()
+    Used for whole files/streams (analyze_frames) and for "analyse
+    while watching", where frames arrive from the browser as the video
+    plays.
+    """
 
-    total_detections = 0
+    def __init__(self, known_encodings, known_names):
+        self.known_encodings = known_encodings
+        self.known_names = known_names
+        self.persons = OrderedDict()
+        self.total_detections = 0
+        self.frames_seen = 0
+        self.best_frame = None
+        self.first_rgb = None
 
-    best_frame = None
+    def add_frame(self, timestamp, rgb):
+        """
+        Analyse one frame; returns the labels of the faces found in it.
+        """
 
-    # `frames` may be a generator (streamed video), so remember the
-    # first frame for the no-faces preview instead of indexing later.
-    first_rgb = None
+        self.frames_seen += 1
 
-    for timestamp, rgb in frames:
+        if self.first_rgb is None:
+            self.first_rgb = rgb
 
-        if first_rgb is None:
-            first_rgb = rgb
+        persons = self.persons
 
-        locations = _locate_faces_fast(
-            rgb
-        )
+        locations = _locate_faces_fast(rgb)
 
         encodings = face_recognition.face_encodings(
             rgb,
@@ -2374,38 +2381,31 @@ def analyze_frames(
 
         frame_labels = []
 
-        for location, encoding in zip(
-            locations,
-            encodings,
-        ):
+        for location, encoding in zip(locations, encodings):
 
-            total_detections += 1
+            self.total_detections += 1
 
             label = None
 
-            if known_encodings:
+            if self.known_encodings:
 
                 matches = face_recognition.compare_faces(
-                    known_encodings,
+                    self.known_encodings,
                     encoding,
                     tolerance=KNOWN_TOLERANCE,
                 )
 
                 distances = face_recognition.face_distance(
-                    known_encodings,
+                    self.known_encodings,
                     encoding,
                 )
 
                 if len(distances):
 
-                    best_index = int(
-                        distances.argmin()
-                    )
+                    best_index = int(distances.argmin())
 
                     if matches[best_index]:
-                        label = known_names[
-                            best_index
-                        ]
+                        label = self.known_names[best_index]
 
             if label is not None:
 
@@ -2443,45 +2443,58 @@ def analyze_frames(
                 timestamp,
             )
 
-            frame_labels.append(
-                label
+            frame_labels.append(label)
+
+        if locations and (
+            self.best_frame is None
+            or len(locations) > self.best_frame[0]
+        ):
+
+            self.best_frame = (
+                len(locations),
+                rgb,
+                locations,
+                frame_labels,
             )
 
-        if locations:
+        return frame_labels
 
-            if (
-                best_frame is None
-                or len(locations)
-                > best_frame[0]
-            ):
+    def preview(self):
 
-                best_frame = (
-                    len(locations),
-                    rgb,
-                    locations,
-                    frame_labels,
-                )
+        if self.best_frame is not None:
 
-    preview = None
+            return annotate_frame(
+                self.best_frame[1],
+                self.best_frame[2],
+                self.best_frame[3],
+            )
 
-    if best_frame is not None:
+        if self.first_rgb is not None:
+            return Image.fromarray(self.first_rgb)
 
-        preview = annotate_frame(
-            best_frame[1],
-            best_frame[2],
-            best_frame[3],
-        )
+        return None
 
-    elif first_rgb is not None:
 
-        preview = Image.fromarray(
-            first_rgb
-        )
+def analyze_frames(
+    frames,
+    known_encodings,
+    known_names,
+):
+
+    # `frames` may be a generator (streamed video); each frame is
+    # analysed as it arrives and never kept.
+    analyzer = FrameAnalyzer(
+        known_encodings,
+        known_names,
+    )
+
+    for timestamp, rgb in frames:
+        analyzer.add_frame(timestamp, rgb)
 
     return (
-        persons,
-        total_detections,
-        preview,
+        analyzer.persons,
+        analyzer.total_detections,
+        analyzer.preview(),
     )
 
 
@@ -3021,6 +3034,38 @@ def _youtube_options(work_dir):
     return options
 
 
+class YouTubeBlockedError(RuntimeError):
+    """
+    YouTube refused the server (bot check / rate limit). The video can
+    still be analysed in the browser with "analyse while watching".
+    """
+
+
+def youtube_video_id(url):
+    """
+    Extract the video id from any common YouTube URL form, or None.
+    """
+
+    parsed = urlparse(url.strip())
+    host = (parsed.hostname or "").lower()
+    candidate = None
+
+    if host == "youtu.be":
+        candidate = parsed.path.lstrip("/").split("/")[0]
+    elif host == "youtube.com" or host.endswith(".youtube.com"):
+        candidate = (parse_qs(parsed.query).get("v") or [None])[0]
+
+        match = re.match(r"/(?:shorts|embed|live|v)/([^/?#]+)", parsed.path)
+
+        if not candidate and match:
+            candidate = match.group(1)
+
+    if candidate and re.fullmatch(r"[A-Za-z0-9_-]{11}", candidate):
+        return candidate
+
+    return None
+
+
 def _youtube_error(exc):
     message = str(exc)
     message_lower = message.lower()
@@ -3028,9 +3073,8 @@ def _youtube_error(exc):
     print("YouTube lookup failed:", message)
 
     if "429" in message:
-        return RuntimeError(
-            "YouTube temporarily rate-limited the server. "
-            "Please try again later."
+        return YouTubeBlockedError(
+            "YouTube temporarily rate-limited the server."
         )
 
     if (
@@ -3039,10 +3083,8 @@ def _youtube_error(exc):
         or "automated traffic" in message_lower
         or "sign in to confirm" in message_lower
     ):
-        return RuntimeError(
-            "YouTube is blocking this server from reading videos. "
-            "Upload the video from your device instead, or set up "
-            "YouTube cookies on the server (see README)."
+        return YouTubeBlockedError(
+            "YouTube is blocking this server from reading videos."
         )
 
     if "private video" in message_lower:
@@ -4046,6 +4088,23 @@ def analyze():
                     request_dir,
                 )
 
+            except YouTubeBlockedError:
+
+                # The server can't read it, but the viewer's browser
+                # can: analyse it while it plays instead.
+                flash(
+                    "YouTube won't let the server read this video, so "
+                    "FaceTally will analyse it while you watch it here.",
+                    "success",
+                )
+
+                return redirect(
+                    url_for(
+                        "watch",
+                        url=url,
+                    )
+                )
+
             except Exception as exc:
 
                 flash(
@@ -4311,6 +4370,275 @@ def history_clear():
 
     return redirect(
         url_for("index")
+    )
+
+
+# ============================================================
+# ANALYSE WHILE WATCHING (YouTube)
+# ============================================================
+#
+# When YouTube blocks the server, the video is analysed in the
+# viewer's own browser session instead: the page plays it in YouTube's
+# player, the viewer shares that tab, and the page sends a frame of the
+# player (with the exact video time) every half second of video. The
+# server analyses each frame as it arrives and saves the result like
+# any other analysis. YouTube only ever sees a normal viewer.
+#
+# Live sessions are kept in memory (gunicorn runs a single worker).
+
+LIVE_SESSIONS = {}
+LIVE_LOCK = threading.Lock()
+LIVE_MAX_AGE_SECONDS = 3 * 60 * 60
+LIVE_MAX_FRAMES = 4000
+LIVE_FRAME_MAX_BYTES = 3 * 1024 * 1024
+
+
+def _purge_live_sessions():
+    cutoff = time.time() - LIVE_MAX_AGE_SECONDS
+
+    with LIVE_LOCK:
+        for live_id in [
+            key
+            for key, live in LIVE_SESSIONS.items()
+            if live["last_seen"] < cutoff
+        ]:
+            LIVE_SESSIONS.pop(live_id, None)
+
+
+def _get_live(live_id):
+    with LIVE_LOCK:
+        live = LIVE_SESSIONS.get(live_id)
+
+    if not live or live["owner"] != current_owner(create_guest=False):
+        return None
+
+    live["last_seen"] = time.time()
+
+    return live
+
+
+def _live_summary(live, on_screen=()):
+    analyzer = live["analyzer"]
+
+    return {
+        "ok": True,
+        "frames": analyzer.frames_seen,
+        "people": [
+            {
+                "label": person["label"],
+                "is_known": person["is_known"],
+                "count": person["count"],
+            }
+            for person in analyzer.persons.values()
+        ],
+        "on_screen": list(on_screen),
+    }
+
+
+@app.route("/watch")
+def watch():
+
+    url = request.args.get("url", "").strip()
+
+    video_id = youtube_video_id(url) if url else None
+
+    if url and not video_id:
+
+        flash(
+            "That doesn't look like a YouTube video link.",
+            "error",
+        )
+
+        return redirect(url_for("index"))
+
+    return render_template(
+        "watch.html",
+        app_name=APP_NAME,
+        user=current_user(),
+        url=url,
+        video_id=video_id,
+    )
+
+
+@app.route(
+    "/live/start",
+    methods=["POST"],
+)
+def live_start():
+
+    _purge_live_sessions()
+
+    url = request.form.get("url", "").strip()
+
+    video_id = youtube_video_id(url)
+
+    if not video_id:
+        return jsonify({"ok": False, "error": "Not a YouTube video link."}), 400
+
+    guest_known_dir = None
+
+    try:
+
+        if current_user():
+
+            known_encodings, known_names = load_known_faces(
+                user_known_faces_dir(current_user()["uid"])
+            )
+
+        else:
+
+            (
+                known_encodings,
+                known_names,
+                guest_known_dir,
+            ) = load_guest_known_faces_from_request()
+
+    finally:
+
+        if guest_known_dir:
+            shutil.rmtree(guest_known_dir, ignore_errors=True)
+
+    try:
+        duration = max(float(request.form.get("duration") or 0), 0.0)
+    except ValueError:
+        duration = 0.0
+
+    live_id = uuid.uuid4().hex
+
+    live = {
+        "owner": current_owner(create_guest=True),
+        "analyzer": FrameAnalyzer(known_encodings, known_names),
+        "lock": threading.Lock(),
+        "url": url,
+        "video_id": video_id,
+        "title": (request.form.get("title") or "YouTube video").strip()[:120],
+        "duration": duration,
+        "timestamps": [],
+        "last_seen": time.time(),
+    }
+
+    with LIVE_LOCK:
+        LIVE_SESSIONS[live_id] = live
+
+    return jsonify({"ok": True, "id": live_id})
+
+
+@app.route(
+    "/live/<live_id>/frame",
+    methods=["POST"],
+)
+def live_frame(live_id):
+
+    live = _get_live(live_id)
+
+    if live is None:
+        return jsonify({"ok": False, "error": "This analysis has expired. Start again."}), 404
+
+    frame = request.files.get("frame")
+
+    try:
+        timestamp = float(request.form.get("t", ""))
+    except ValueError:
+        timestamp = -1.0
+
+    if not frame or timestamp < 0 or timestamp != timestamp:
+        return jsonify({"ok": False, "error": "Bad frame."}), 400
+
+    data = frame.read(LIVE_FRAME_MAX_BYTES + 1)
+
+    if len(data) > LIVE_FRAME_MAX_BYTES:
+        return jsonify({"ok": False, "error": "Frame too large."}), 413
+
+    if live["analyzer"].frames_seen >= LIVE_MAX_FRAMES:
+        return jsonify(_live_summary(live))
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image = image.convert("RGB")
+            image.thumbnail((VIDEO_FRAME_MAX_WIDTH, VIDEO_FRAME_MAX_WIDTH))
+            rgb = np.array(image)
+    except Exception:
+        return jsonify({"ok": False, "error": "Couldn't read that frame."}), 400
+
+    with live["lock"]:
+        labels = live["analyzer"].add_frame(timestamp, rgb)
+        live["timestamps"].append(timestamp)
+
+    return jsonify(_live_summary(live, on_screen=labels))
+
+
+@app.route(
+    "/live/<live_id>/finish",
+    methods=["POST"],
+)
+def live_finish(live_id):
+
+    live = _get_live(live_id)
+
+    if live is None:
+        return jsonify({"ok": False, "error": "This analysis has expired. Start again."}), 404
+
+    with live["lock"]:
+
+        analyzer = live["analyzer"]
+
+        if analyzer.frames_seen == 0:
+            return jsonify({"ok": False, "error": "No frames were captured yet."}), 400
+
+        timestamps = sorted(set(live["timestamps"]))
+
+        gaps = sorted(
+            later - earlier
+            for earlier, later in zip(timestamps, timestamps[1:])
+            if later > earlier
+        )
+
+        # Frames arrive as fast as the server keeps up, so use the
+        # typical spacing actually achieved for grouping appearances.
+        sample_interval = max(
+            1.0 / TARGET_SAMPLE_FPS,
+            gaps[len(gaps) // 2] if gaps else 0.0,
+        )
+
+        preview = analyzer.preview()
+
+        result = finalize_analysis_result(
+            analyzer.persons,
+            analyzer.total_detections,
+            preview,
+            "video",
+            sampled_frames=analyzer.frames_seen,
+            duration=live["duration"] or (timestamps[-1] if timestamps else 0),
+            sample_interval=sample_interval,
+        )
+
+        entry_id = history_add(
+            {
+                "title": live["title"],
+                "kind": "youtube",
+                "source_url": live["url"],
+                "media_type": "video",
+                "method": "watch",
+                "playback": {
+                    "type": "youtube",
+                    "video_id": live["video_id"],
+                },
+            },
+            result,
+            preview,
+        )
+
+    with LIVE_LOCK:
+        LIVE_SESSIONS.pop(live_id, None)
+
+    return jsonify(
+        {
+            "ok": True,
+            "redirect": url_for(
+                "history_entry",
+                entry_id=entry_id,
+            ) + "#result",
+        }
     )
 
 

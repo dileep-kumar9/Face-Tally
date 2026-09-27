@@ -141,6 +141,17 @@ docker run --rm -p 10000:10000 --env-file .env.local \
 
 The app runs at http://localhost:10000. The Dockerfile installs the face-recognition/dlib runtime and runs the Flask app with Gunicorn. Secrets are excluded from the image by `.dockerignore`, so pass them with `--env-file` locally and as environment variables on Render.
 
+## Analyse while watching (YouTube)
+
+When YouTube won't let the server read a video, FaceTally doesn't fail: it opens the **Analyse while watching** page (also reachable from the link under the upload box, or `/watch?url=<YouTube link>`).
+
+1. The video plays in YouTube's own player on the page.
+2. The viewer clicks **Start analysing** and, when the browser asks, shares **this tab**.
+3. Every half second of video the page cuts the player out of the tab capture and sends that frame, with the exact video time, to the server, which analyses it immediately (live people count and "on screen now").
+4. When the video ends, or on **Finish & save**, the result is saved to "Your analyses" with the YouTube player and timeline tracing, like any other analysis.
+
+YouTube only ever sees a normal viewer, so this can't be blocked and needs no cookies or proxy. It runs in real time (skipping ahead and YouTube's speed setting both work) and needs a desktop browser (Chrome or Edge recommended; phones can't share a tab). Frames are analysed and discarded, never stored. Saved faces (the account's, or a guest's browser faces) are recognised.
+
 ## YouTube links on Render
 
 YouTube blocks most cloud-server IPs (Render included) with a "confirm you're not a bot" check. This applies even though FaceTally only *reads* the stream for analysis and never downloads it, so YouTube links fail on Render by default (playback in the browser is unaffected). On a home connection, e.g. running locally, they work without setup. Uploading the video file always works. To enable YouTube analysis on Render, configure one of:

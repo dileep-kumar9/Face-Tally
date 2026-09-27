@@ -106,6 +106,27 @@
     }
 
 
+    // "Analyse while watching" opens with the link already filled in.
+    const watchModeLink =
+        document.getElementById("watch-mode-link");
+
+    if (watchModeLink && urlInput) {
+        watchModeLink.addEventListener(
+            "click",
+            function (event) {
+
+                const link = urlInput.value.trim();
+
+                if (link) {
+                    event.preventDefault();
+                    window.location.href =
+                        watchModeLink.href + "?url=" + encodeURIComponent(link);
+                }
+            }
+        );
+    }
+
+
     // ============================================================
     // DRAG ENTER / DRAG OVER
     // ============================================================
@@ -1113,6 +1134,12 @@
             }
         );
     }
+
+
+    // The "analyse while watching" page sends guest faces too.
+    window.FaceTallyGuest = {
+        getGuestFaces: getGuestFaces
+    };
 
 
     function guestAvatarUrl(blob) {

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#0c0e14">
+    <link rel="icon" href="{{ url_for('static', filename='icons/icon-192.png') }}">
+    <title>Analyse while watching — {{ app_name }}</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+
+<body data-authenticated="{{ 'true' if user else 'false' }}">
+
+<div class="topbar">
+    <div class="topbar-inner">
+
+        <a class="logo-mark" href="{{ url_for('index') }}" aria-label="{{ app_name }} home">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#0b0c18" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M4 8V5a1 1 0 0 1 1-1h3"/><path d="M20 8V5a1 1 0 0 0-1-1h-3"/>
+                <path d="M4 16v3a1 1 0 0 0 1 1h3"/><path d="M20 16v3a1 1 0 0 1-1 1h-3"/>
+                <circle cx="12" cy="12" r="3"/>
+            </svg>
+        </a>
+
+        <div>
+            <div class="brand-name">{{ app_name }}</div>
+            <div class="brand-tag">Analyse while watching</div>
+        </div>
+
+        <div class="topbar-logout">
+            <a class="btn-secondary login-btn" href="{{ url_for('index') }}">← Back</a>
+        </div>
+
+    </div>
+</div>
+
+
+<div class="wrap">
+
+{% with messages = get_flashed_messages(with_categories=true) %}
+    {% for category, message in messages %}
+    <div class="flash {{ category }}">{{ message }}</div>
+    {% endfor %}
+{% endwith %}
+
+
+<div class="section-title">
+    Analyse a YouTube video while you watch it
+</div>
+
+
+{% if not video_id %}
+
+<div class="card">
+
+    <form class="watch-url-form" method="get" action="{{ url_for('watch') }}">
+        <input type="url" name="url" placeholder="https://www.youtube.com/watch?v=…" required>
+        <button type="submit">Open video</button>
+    </form>
+
+    <p class="hint">
+        Use this when YouTube won't let the server read a video. The video
+        plays here in YouTube's player and FaceTally analyses what you see.
+    </p>
+
+</div>
+
+{% else %}
+
+<div
+    class="card"
+    id="watch-app"
+    data-video-id="{{ video_id }}"
+    data-url="{{ url }}"
+>
+
+    <div class="result-heading">
+        <div class="result-heading-text">
+            <div class="result-title" id="watch-title">YouTube video</div>
+            <div class="result-sub">
+                <a class="result-source" href="{{ url }}" target="_blank" rel="noopener noreferrer">{{ url }}</a>
+            </div>
+        </div>
+    </div>
+
+
+    <ol class="watch-steps">
+        <li>Click <strong>Start analysing</strong>.</li>
+        <li>When your browser asks what to share, choose <strong>this tab</strong> and click <strong>Share</strong>.</li>
+        <li>Let the video play. Keep this tab open and the video visible; you can skip ahead or use YouTube's speed setting.</li>
+        <li>It saves automatically when the video ends, or click <strong>Finish &amp; save</strong> at any time.</li>
+    </ol>
+
+
+    {# The stage is the region that gets captured: nothing may overlap it. #}
+    <div class="watch-stage" id="watch-stage">
+        <div id="watch-player"></div>
+    </div>
+
+
+    <div class="watch-actions">
+
+        <button type="button" id="watch-start">
+            ● Start analysing
+        </button>
+
+        <button type="button" class="btn-secondary" id="watch-finish" disabled>
+            Finish &amp; save
+        </button>
+
+    </div>
+
+
+    <div class="watch-status" id="watch-status" aria-live="polite">
+        Ready. Nothing is captured until you click Start and share this tab.
+    </div>
+
+    <div class="now-showing" id="watch-now"></div>
+
+    <div class="chip-list watch-people" id="watch-people"></div>
+
+    <p class="hint">
+        Needs a desktop browser (Chrome or Edge recommended; Firefox works
+        too). Only the video area of this tab is analysed; frames are sent
+        to the FaceTally server and not stored.
+    </p>
+
+</div>
+
+{% endif %}
+
+</div>
+
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+<script src="{{ url_for('static', filename='watch.js') }}"></script>
+
+</body>
+</html>

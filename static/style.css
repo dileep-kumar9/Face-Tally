@@ -2837,3 +2837,85 @@ details.manage-known .add-known-form {
     border-color: var(--accent);
     box-shadow: 0 0 0 1px var(--accent);
 }
+
+
+/* ============================================================
+   ANALYSE WHILE WATCHING
+============================================================ */
+
+.hint a {
+    color: var(--accent);
+}
+
+.watch-url-form {
+    display: flex;
+    gap: 8px;
+}
+
+.watch-url-form button {
+    width: auto;
+    flex-shrink: 0;
+}
+
+.watch-steps {
+    margin: 4px 0 14px;
+    padding-left: 20px;
+    font-size: 0.85rem;
+    color: var(--text-muted);
+    line-height: 1.6;
+}
+
+.watch-steps strong {
+    color: var(--text);
+}
+
+/* The captured region: must not be overlapped by anything. */
+.watch-stage {
+    width: 100%;
+    aspect-ratio: 16 / 9;
+    border-radius: 12px;
+    overflow: hidden;
+    background: #000;
+}
+
+.watch-stage iframe,
+.watch-stage #watch-player {
+    width: 100%;
+    height: 100%;
+    border: 0;
+    display: block;
+}
+
+.watch-actions {
+    display: flex;
+    gap: 8px;
+    margin: 12px 0 8px;
+}
+
+.watch-actions button {
+    flex: 1 1 0;
+}
+
+.watch-status {
+    font-size: 0.85rem;
+    color: var(--text);
+    min-height: 1.3em;
+}
+
+.watch-status.error {
+    color: var(--danger);
+}
+
+.watch-people {
+    margin-top: 10px;
+}
+
+.chip.chip-known {
+    border-color: var(--accent);
+}
+
+.chip.chip-now {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    color: var(--text);
+}
