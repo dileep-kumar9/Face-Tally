@@ -90,14 +90,38 @@ The app uses one directory per Firebase UID, so persistent face data remains sep
 
 ## Local run
 
-Install the Python requirements and run:
+**Use Python 3.11.** Newer versions (e.g. 3.14) have no wheels for `dlib-bin` or `numpy<2`, so installation fails.
 
-```bash
-pip install -r requirements-aws.txt
-python app.py
+Put your local settings in `.env.local` (or `.env`) next to `app.py`; see `.env.example`.
+
+### Option A: Python 3.11 virtualenv (fastest for development)
+
+Windows (PowerShell):
+
+```powershell
+py -3.11 -m venv .venv
+.venv\Scripts\python -m pip install --upgrade pip wheel "setuptools<81"
+.venv\Scripts\python -m pip install dlib-bin
+.venv\Scripts\python -m pip install -r requirements-aws.txt
+.venv\Scripts\python -m pip install --no-deps face_recognition==1.3.0 face_recognition_models==0.3.0
+.venv\Scripts\python app.py
 ```
 
-The Dockerfile installs the face-recognition/dlib runtime and runs the Flask app with Gunicorn.
+The app runs at http://localhost:5000. `--no-deps` stops pip from trying to build `dlib` from source; `setuptools<81` keeps `pkg_resources`, which `face_recognition_models` needs.
+
+### Option B: Docker (identical to the Render deployment)
+
+```bash
+docker build -t facetally .
+docker run --rm -p 10000:10000 --env-file .env.local \
+  -v facetally-data:/data \
+  -v "$(pwd)/firebase-service-account.json:/app/firebase-service-account.json:ro" \
+  facetally
+```
+
+(Drop the service-account mount if you configure Firebase Admin through `FIREBASE_SERVICE_ACCOUNT_JSON` or the individual `FIREBASE_*` variables instead.)
+
+The app runs at http://localhost:10000. The Dockerfile installs the face-recognition/dlib runtime and runs the Flask app with Gunicorn. Secrets are excluded from the image by `.dockerignore`, so pass them with `--env-file` locally and as environment variables on Render.
 
 ## Security notes
 

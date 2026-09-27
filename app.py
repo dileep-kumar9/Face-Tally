@@ -1,11 +1,14 @@
 import base64
 import io
+import ipaddress
 import json
 import mimetypes
 import os
 import re
 import shutil
+import socket
 import tempfile
+import time
 import uuid
 from collections import OrderedDict
 from functools import wraps
@@ -19,9 +22,11 @@ from dotenv import load_dotenv
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Load .env.local for local development.
-# On Render, real environment variables take precedence.
+# Load .env.local, then .env, for local development. Values already
+# set win, so .env.local overrides .env and real environment variables
+# (e.g. on Render) override both.
 load_dotenv(os.path.join(BASE_DIR, ".env.local"))
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # ============================================================
 # THIRD-PARTY IMPORTS
@@ -44,7 +49,7 @@ from flask import (
     url_for,
 )
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageOps
 import face_recognition
 
 try:
@@ -417,6 +422,35 @@ def cleanup_session_playback():
     )
 
 
+PLAYBACK_MAX_AGE_SECONDS = 6 * 60 * 60
+
+
+def purge_old_playback(max_age=PLAYBACK_MAX_AGE_SECONDS):
+    """
+    Delete playback videos older than max_age. Sessions that never
+    come back would otherwise leave their videos on disk forever.
+    """
+
+    cutoff = time.time() - max_age
+
+    try:
+        filenames = os.listdir(PLAYBACK_DIR)
+    except OSError:
+        return
+
+    for filename in filenames:
+        path = os.path.join(PLAYBACK_DIR, filename)
+
+        try:
+            if (
+                os.path.isfile(path)
+                and os.path.getmtime(path) < cutoff
+            ):
+                os.remove(path)
+        except OSError:
+            pass
+
+
 # ============================================================
 # FIREBASE ROUTES
 # ============================================================
@@ -452,9 +486,9 @@ def firebase_session():
     id_token = data.get(
         "idToken",
         "",
-    ).strip()
+    )
 
-    if not id_token:
+    if not isinstance(id_token, str) or not id_token.strip():
         return jsonify(
             {
                 "ok": False,
@@ -463,11 +497,18 @@ def firebase_session():
         ), 400
 
     try:
+        # A small clock skew allowance avoids "Token used too early"
+        # failures when the local PC clock is a few seconds off.
         decoded = firebase_auth.verify_id_token(
-            id_token
+            id_token.strip(),
+            clock_skew_seconds=10,
         )
 
-    except Exception:
+    except Exception as exc:
+        print(
+            f"WARNING: Firebase ID token verification failed: {exc}"
+        )
+
         return jsonify(
             {
                 "ok": False,
@@ -730,18 +771,14 @@ def load_known_faces(known_faces_dir):
 
         try:
 
-            image = face_recognition.load_image_file(
-                path
+            encoding = encode_reference(
+                load_rgb_image(path)
             )
 
-            encodings = face_recognition.face_encodings(
-                image
-            )
-
-            if encodings:
+            if encoding is not None:
 
                 known_encodings.append(
-                    encodings[0]
+                    encoding
                 )
 
                 known_names.append(
@@ -798,6 +835,161 @@ def list_known_people(
 # ============================================================
 # IMAGE HELPERS
 # ============================================================
+
+REFERENCE_FACE_MIN_SIZE = 160
+REFERENCE_MAX_SIZE = 480
+PREVIEW_MAX_SIZE = 1280
+
+
+def load_rgb_image(source):
+    """
+    Load an image file (path or file-like) as an RGB numpy array,
+    applying the EXIF orientation so phone photos aren't sideways.
+    """
+
+    with Image.open(source) as image:
+        image = ImageOps.exif_transpose(image)
+
+        return np.array(
+            image.convert("RGB")
+        )
+
+
+def encode_reference(rgb):
+    """
+    Return the first face encoding in a reference image, or None.
+
+    Falls back to upsampled detection so small saved faces still work.
+    """
+
+    encodings = face_recognition.face_encodings(rgb)
+
+    if encodings:
+        return encodings[0]
+
+    locations = face_recognition.face_locations(
+        rgb,
+        number_of_times_to_upsample=2,
+    )
+
+    if not locations:
+        return None
+
+    encodings = face_recognition.face_encodings(
+        rgb,
+        locations[:1],
+    )
+
+    return encodings[0] if encodings else None
+
+
+def make_reference_image(
+    rgb_frame,
+    location,
+):
+    """
+    Crop a face for saving as a known-person reference. Small faces
+    are upscaled so the detector can find them again later.
+    """
+
+    image = _crop_face_region(
+        rgb_frame,
+        location,
+        pad_ratio=0.6,
+    )
+
+    top, right, bottom, left = location
+
+    face_size = max(
+        right - left,
+        bottom - top,
+        1,
+    )
+
+    if face_size < REFERENCE_FACE_MIN_SIZE:
+        scale = REFERENCE_FACE_MIN_SIZE / face_size
+
+        image = image.resize(
+            (
+                max(int(image.width * scale), 1),
+                max(int(image.height * scale), 1),
+            ),
+            Image.LANCZOS,
+        )
+
+    image.thumbnail(
+        (
+            REFERENCE_MAX_SIZE,
+            REFERENCE_MAX_SIZE,
+        )
+    )
+
+    return image
+
+
+def remove_existing_reference(
+    known_dir,
+    name,
+):
+    """
+    Delete any saved reference photo for this name, whatever its
+    extension, so a person never has two photos.
+    """
+
+    for existing in os.listdir(known_dir):
+        if (
+            os.path.splitext(existing)[0] == name
+            and allowed_file(existing)
+            and not is_video_file(existing)
+        ):
+            try:
+                os.remove(
+                    os.path.join(
+                        known_dir,
+                        existing,
+                    )
+                )
+            except OSError:
+                pass
+
+
+def save_reference_image(
+    known_dir,
+    name,
+    pil_image,
+):
+    """
+    Atomically replace the saved reference photo for this name.
+    """
+
+    save_path = os.path.join(
+        known_dir,
+        f"{name}.jpg",
+    )
+
+    temp_path = os.path.join(
+        known_dir,
+        f".{uuid.uuid4().hex}.tmp",
+    )
+
+    pil_image.convert("RGB").save(
+        temp_path,
+        format="JPEG",
+        quality=92,
+    )
+
+    remove_existing_reference(
+        known_dir,
+        name,
+    )
+
+    os.replace(
+        temp_path,
+        save_path,
+    )
+
+    return save_path
+
 
 def image_to_base64(
     pil_image,
@@ -1045,12 +1237,18 @@ def sample_video_frames(
     if not cap.isOpened():
         return [], 0.0, 0.0, 0
 
-    fps = (
-        cap.get(
-            cv2.CAP_PROP_FPS
-        )
-        or 25.0
+    reported_fps = cap.get(
+        cv2.CAP_PROP_FPS
     )
+
+    # Browser (MediaRecorder) WebM files often report 0 or 1000 fps.
+    # Treat anything implausible as unknown and fall back to 30.
+    fps_known = (
+        reported_fps == reported_fps  # not NaN
+        and 1.0 <= reported_fps <= 240.0
+    )
+
+    fps = reported_fps if fps_known else 30.0
 
     total_frames = int(
         cap.get(
@@ -1058,24 +1256,12 @@ def sample_video_frames(
         )
     )
 
-    duration = (
-        total_frames / fps
-        if fps
-        else 0.0
-    )
-
-    step = max(
-        int(
-            round(
-                fps
-                / target_fps
-            )
-        ),
-        1,
-    )
+    interval = 1.0 / target_fps
 
     frames = []
     index = 0
+    next_sample = 0.0
+    last_timestamp = 0.0
 
     while True:
 
@@ -1084,7 +1270,24 @@ def sample_video_frames(
         if not ret:
             break
 
-        if index % step == 0:
+        # Prefer the container's own timestamp; it stays correct
+        # even when the reported frame rate is wrong.
+        position_ms = cap.get(
+            cv2.CAP_PROP_POS_MSEC
+        )
+
+        timestamp = (
+            position_ms / 1000.0
+            if position_ms and position_ms > 0
+            else index / fps
+        )
+
+        last_timestamp = max(
+            last_timestamp,
+            timestamp,
+        )
+
+        if timestamp >= next_sample:
 
             rgb = cv2.cvtColor(
                 frame_bgr,
@@ -1093,10 +1296,13 @@ def sample_video_frames(
 
             frames.append(
                 (
-                    index / fps,
+                    timestamp,
                     rgb,
                 )
             )
+
+            while next_sample <= timestamp:
+                next_sample += interval
 
             if len(frames) >= max_samples:
                 break
@@ -1104,6 +1310,14 @@ def sample_video_frames(
         index += 1
 
     cap.release()
+
+    if fps_known and total_frames > 0:
+        duration = max(
+            total_frames / fps,
+            last_timestamp,
+        )
+    else:
+        duration = last_timestamp
 
     return (
         frames,
@@ -1302,6 +1516,13 @@ def _match_or_create_unknown(
             rgb,
             location,
         ),
+        "ref": image_to_base64(
+            make_reference_image(
+                rgb,
+                location,
+            ),
+            fmt="JPEG",
+        ),
         "first_ts": timestamp,
         "last_ts": timestamp,
         "timestamps": [],
@@ -1498,10 +1719,9 @@ def _best_reference_frame(frames):
     if not encodings:
         return None
 
-    image = _crop_face_region(
+    image = make_reference_image(
         rgb,
         location,
-        pad_ratio=0.6,
     )
 
     return (
@@ -1552,6 +1772,10 @@ def finalize_persons(persons):
                 "count": person["count"],
                 "is_known": person["is_known"],
                 "thumb": person["thumb"],
+                "ref": person.get(
+                    "ref",
+                    person["thumb"],
+                ),
                 "first_ts": round(
                     person.get(
                         "first_ts",
@@ -1642,6 +1866,77 @@ DOWNLOAD_HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+
+MAX_REDIRECTS = 5
+
+
+def _assert_public_url(url):
+    """
+    Refuse URLs that aren't http(s) or that resolve to a private,
+    loopback, link-local or otherwise internal address, so the server
+    can't be used to reach its own network (SSRF).
+    """
+
+    parsed = urlparse(url)
+
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError(
+            "Only public http(s) links are supported."
+        )
+
+    try:
+        addresses = socket.getaddrinfo(
+            parsed.hostname,
+            parsed.port or (443 if parsed.scheme == "https" else 80),
+            proto=socket.IPPROTO_TCP,
+        )
+    except socket.gaierror as exc:
+        raise ValueError(
+            "Couldn't resolve that link's host."
+        ) from exc
+
+    for *_, sockaddr in addresses:
+        ip = ipaddress.ip_address(
+            sockaddr[0].split("%")[0]
+        )
+
+        if not ip.is_global:
+            raise ValueError(
+                "That link points to a private or internal address."
+            )
+
+
+def _safe_get(client, url):
+    """
+    GET a URL with streaming, re-checking every redirect hop
+    against _assert_public_url.
+    """
+
+    for _ in range(MAX_REDIRECTS + 1):
+        _assert_public_url(url)
+
+        response = client.get(
+            url,
+            stream=True,
+            timeout=30,
+            allow_redirects=False,
+            headers=DOWNLOAD_HEADERS,
+        )
+
+        if response.is_redirect:
+            location = response.headers.get("Location", "")
+            response.close()
+            url = requests.compat.urljoin(url, location)
+            continue
+
+        response.raise_for_status()
+
+        return response
+
+    raise ValueError(
+        "That link redirected too many times."
+    )
 
 
 def _write_response_to_file(
@@ -1745,15 +2040,10 @@ def _drive_download(
 
     client = requests.Session()
 
-    response = client.get(
+    response = _safe_get(
+        client,
         direct_url,
-        stream=True,
-        timeout=30,
-        allow_redirects=True,
-        headers=DOWNLOAD_HEADERS,
     )
-
-    response.raise_for_status()
 
     content_type = (
         response.headers
@@ -1801,15 +2091,10 @@ def _drive_download(
                     + token
                 )
 
-                response = client.get(
+                response = _safe_get(
+                    client,
                     direct_url,
-                    stream=True,
-                    timeout=30,
-                    allow_redirects=True,
-                    headers=DOWNLOAD_HEADERS,
                 )
-
-                response.raise_for_status()
 
                 content_type = (
                     response.headers
@@ -1871,15 +2156,10 @@ def download_from_url(
             dest_dir,
         )
 
-    response = requests.get(
+    response = _safe_get(
+        requests.Session(),
         url,
-        stream=True,
-        timeout=30,
-        allow_redirects=True,
-        headers=DOWNLOAD_HEADERS,
     )
-
-    response.raise_for_status()
 
     extension = _extension_from_response(
         response,
@@ -2294,7 +2574,7 @@ def add_known():
 
         else:
 
-            rgb = face_recognition.load_image_file(
+            rgb = load_rgb_image(
                 temp_path
             )
 
@@ -2415,27 +2695,6 @@ def add_known():
                 url_for("index")
             )
 
-        for existing in os.listdir(
-            known_dir
-        ):
-
-            if (
-                os.path.splitext(existing)[0]
-                == cleaned_name
-                and allowed_file(existing)
-                and not is_video_file(existing)
-            ):
-
-                try:
-                    os.remove(
-                        os.path.join(
-                            known_dir,
-                            existing,
-                        )
-                    )
-                except OSError:
-                    pass
-
         if is_video:
 
             best = _best_reference_frame(
@@ -2473,25 +2732,21 @@ def add_known():
                     url_for("index")
                 )
 
-            cropped_image = _crop_face_region(
+            cropped_image = make_reference_image(
                 frames[0][1],
                 locations[0],
-                pad_ratio=0.6,
             )
 
-        save_path = os.path.join(
+        # Only replace an existing photo for this name once the new
+        # one is known to be good.
+        save_reference_image(
             known_dir,
-            f"{cleaned_name}.jpg",
-        )
-
-        cropped_image.save(
-            save_path,
-            format="JPEG",
-            quality=90,
+            cleaned_name,
+            cropped_image,
         )
 
         flash(
-            f"Added '{name}' to known people.",
+            f"Added '{cleaned_name}' to known people.",
             "success",
         )
 
@@ -2578,49 +2833,44 @@ def save_unknown():
             }
         ), 400
 
-    save_path = os.path.join(
-        user_known_faces_dir(
-            current_user()["uid"]
-        ),
-        f"{cleaned_name}.jpg",
-    )
-
+    # Validate in memory first so a bad image never overwrites an
+    # existing saved photo with the same name.
     try:
 
-        with open(
-            save_path,
-            "wb",
-        ) as f:
-            f.write(
-                image_bytes
-            )
+        with Image.open(
+            io.BytesIO(image_bytes)
+        ) as opened:
+            pil_image = ImageOps.exif_transpose(
+                opened
+            ).convert("RGB")
 
-        image = face_recognition.load_image_file(
-            save_path
-        )
-
-        encodings = face_recognition.face_encodings(
-            image
+        encoding = encode_reference(
+            np.array(pil_image)
         )
 
     except Exception:
 
-        encodings = []
+        encoding = None
 
-    if not encodings:
-
-        if os.path.exists(save_path):
-            os.remove(save_path)
+    if encoding is None:
 
         return jsonify(
             {
                 "ok": False,
                 "error": (
                     "Couldn't detect a clear face "
-                    "in that thumbnail."
+                    "in that photo."
                 ),
             }
         ), 400
+
+    save_reference_image(
+        user_known_faces_dir(
+            current_user()["uid"]
+        ),
+        cleaned_name,
+        pil_image,
+    )
 
     return jsonify(
         {
@@ -2679,6 +2929,24 @@ def remove_known(name):
 # ============================================================
 # FINALIZE ANALYSIS RESULT
 # ============================================================
+
+def _shrink_preview(pil_image):
+    """
+    Downscale large previews; a full-resolution phone photo embedded
+    as base64 would make the result page tens of MB.
+    """
+
+    pil_image = pil_image.convert("RGB")
+
+    pil_image.thumbnail(
+        (
+            PREVIEW_MAX_SIZE,
+            PREVIEW_MAX_SIZE,
+        )
+    )
+
+    return pil_image
+
 
 def finalize_analysis_result(
     persons_raw,
@@ -2741,7 +3009,8 @@ def finalize_analysis_result(
         "video_url": video_url,
         "preview_image": (
             image_to_base64(
-                preview
+                _shrink_preview(preview),
+                fmt="JPEG",
             )
             if preview is not None
             else None
@@ -2800,6 +3069,9 @@ def load_guest_known_faces_from_request():
         dir=UPLOADS_DIR,
     )
 
+    encodings = []
+    known_names = []
+
     for index, file in enumerate(
         files
     ):
@@ -2832,16 +3104,26 @@ def load_guest_known_faces_from_request():
 
         path = os.path.join(
             temp_dir,
-            f"{name}_{index}.{extension}",
+            f"{index}.{extension}",
         )
 
         file.save(
             path
         )
 
-    encodings, known_names = load_known_faces(
-        temp_dir
-    )
+        # Encode here rather than via load_known_faces so the label
+        # is the person's name, not the temporary filename.
+        try:
+            encoding = encode_reference(
+                load_rgb_image(path)
+            )
+        except Exception as exc:
+            print(f"Could not process guest face {name}: {exc}")
+            encoding = None
+
+        if encoding is not None:
+            encodings.append(encoding)
+            known_names.append(name)
 
     return (
         encodings,
@@ -2928,39 +3210,29 @@ def import_known():
             f"import_{uuid.uuid4().hex}.{extension}",
         )
 
-        save_path = os.path.join(
-            known_dir,
-            f"{name}.jpg",
-        )
-
         try:
 
             file.save(
                 temp_path
             )
 
-            image = face_recognition.load_image_file(
+            with Image.open(
                 temp_path
-            )
+            ) as opened:
+                pil = ImageOps.exif_transpose(
+                    opened
+                ).convert("RGB")
 
-            encodings = face_recognition.face_encodings(
-                image
-            )
-
-            if not encodings:
+            if encode_reference(np.array(pil)) is None:
 
                 skipped.append(name)
 
                 continue
 
-            pil = Image.open(
-                temp_path
-            ).convert("RGB")
-
-            pil.save(
-                save_path,
-                format="JPEG",
-                quality=92,
+            save_reference_image(
+                known_dir,
+                name,
+                pil,
             )
 
             imported.append(name)
@@ -3002,6 +3274,7 @@ def import_known():
 def analyze():
 
     cleanup_session_playback()
+    purge_old_playback()
 
     guest_known_dir = None
 
@@ -3015,6 +3288,14 @@ def analyze():
     ).strip()
 
     upload_path = None
+
+    # Every request works in its own folder, so concurrent uploads
+    # with the same name (e.g. camera-photo.jpg) can't collide and
+    # the YouTube fallback only ever sees this request's download.
+    request_dir = tempfile.mkdtemp(
+        prefix="analyze_",
+        dir=UPLOADS_DIR,
+    )
 
     try:
 
@@ -3059,7 +3340,7 @@ def analyze():
             )
 
             upload_path = os.path.join(
-                UPLOADS_DIR,
+                request_dir,
                 filename,
             )
 
@@ -3078,7 +3359,7 @@ def analyze():
                 upload_path = (
                     download_media_from_link(
                         url,
-                        UPLOADS_DIR,
+                        request_dir,
                     )
                 )
 
@@ -3170,7 +3451,7 @@ def analyze():
 
         if media_type == "image":
 
-            rgb = face_recognition.load_image_file(
+            rgb = load_rgb_image(
                 upload_path
             )
 
@@ -3246,13 +3527,6 @@ def analyze():
             ),
         )
 
-        if (
-            media_type == "video"
-            and result["video_url"]
-        ):
-
-            upload_path = None
-
         user = current_user()
 
         return render_template(
@@ -3288,19 +3562,12 @@ def analyze():
 
     finally:
 
-        if (
-            upload_path
-            and os.path.exists(
-                upload_path
-            )
-        ):
-
-            try:
-                os.remove(
-                    upload_path
-                )
-            except Exception:
-                pass
+        # A playable video has already been moved to PLAYBACK_DIR,
+        # so everything left in request_dir is temporary.
+        shutil.rmtree(
+            request_dir,
+            ignore_errors=True,
+        )
 
         if (
             guest_known_dir
@@ -3313,6 +3580,32 @@ def analyze():
                 guest_known_dir,
                 ignore_errors=True,
             )
+
+
+# ============================================================
+# SERVICE WORKER
+# ============================================================
+
+@app.route("/sw.js")
+def service_worker():
+    """
+    Serve the service worker from the site root so its scope covers
+    the whole app, not just /static/.
+    """
+
+    response = send_file(
+        os.path.join(
+            BASE_DIR,
+            "static",
+            "sw.js",
+        ),
+        mimetype="application/javascript",
+        max_age=0,
+    )
+
+    response.headers["Cache-Control"] = "no-cache"
+
+    return response
 
 
 # ============================================================

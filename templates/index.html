@@ -382,6 +382,8 @@
                 </button>
 
 
+                {# Guest saved faces are stored as photos only. #}
+                {% if user %}
                 <button
                     type="button"
                     class="file-btn camera-open-btn"
@@ -389,6 +391,7 @@
                 >
                     Record video
                 </button>
+                {% endif %}
 
             </div>
 
@@ -550,7 +553,7 @@
 
     <img
         class="result-preview"
-        src="data:image/png;base64,{{ result.preview_image }}"
+        src="data:image/jpeg;base64,{{ result.preview_image }}"
         alt="Annotated preview frame"
     >
 
@@ -704,7 +707,7 @@
                     <input
                         type="hidden"
                         class="save-unknown-thumb"
-                        value="{{ p.thumb }}"
+                        value="{{ p.ref }}"
                     >
 
                     <button
@@ -890,8 +893,8 @@
 
 <div class="footer-note">
 
-    Runs locally — nothing is sent anywhere except when
-    you paste a link.
+    Photos and videos are processed on the FaceTally server and
+    deleted afterwards (videos are kept for a few hours for playback).
 
     <br>
 

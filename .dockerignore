@@ -8,6 +8,14 @@ __pycache__
 *.pyo
 *.pyd
 
+# Secrets must never be baked into the image; Render supplies
+# them as environment variables.
+.env
+.env.*
+firebase-service-account.json
+
+node_modules
+
 uploads/*
 known_faces/*
 

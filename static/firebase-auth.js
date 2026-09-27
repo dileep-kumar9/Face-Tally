@@ -718,13 +718,15 @@ async function wireLogout() {
 
 (async function () {
 
+    // Wire logout first: it must still clear the server session even
+    // if Firebase fails to load (wireLogout checks `auth` at click time).
+    await wireLogout();
+
     try {
 
         await loadFirebase();
 
         await wireAuthPage();
-
-        await wireLogout();
 
     } catch (error) {
 

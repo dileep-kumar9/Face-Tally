@@ -1696,90 +1696,117 @@
                 event.preventDefault();
 
 
+                let faces = [];
+
                 try {
 
-                    const faces =
+                    faces =
                         await getGuestFaces();
-
-
-                    const body =
-                        new FormData(form);
-
-
-                    // Guest faces are attached only to this request.
-                    for (
-                        const face of faces
-                    ) {
-
-                        body.append(
-                            "guest_known",
-                            face.blob,
-                            face.filename ||
-                            `${face.name}.jpg`
-                        );
-
-                        body.append(
-                            "guest_name",
-                            face.name
-                        );
-                    }
-
-
-                    const response =
-                        await fetch(
-                            form.action,
-                            {
-                                method: "POST",
-                                body: body,
-                                credentials: "same-origin"
-                            }
-                        );
-
-
-                    const html =
-                        await response.text();
-
-
-                    if (!response.ok) {
-                        throw new Error(
-                            "Analysis request failed."
-                        );
-                    }
-
-
-                    document.open();
-
-                    document.write(
-                        html
-                    );
-
-                    document.close();
 
                 } catch (error) {
 
-                    console.error(
-                        "Guest analysis error:",
+                    console.warn(
+                        "Could not read guest faces; analyzing without them:",
                         error
                     );
-
-
-                    if (analyzeBtn) {
-
-                        analyzeBtn.textContent =
-                            "Analyze";
-
-                        analyzeBtn.disabled =
-                            false;
-                    }
-
-
-                    alert(
-                        "Analysis failed. Please try again."
-                    );
                 }
+
+
+                // Guest faces are attached only to this request, as
+                // hidden file inputs, so the browser does a normal
+                // form navigation to the result page.
+                form
+                    .querySelectorAll(".guest-known-field")
+                    .forEach(function (element) {
+                        element.remove();
+                    });
+
+
+                if (faces.length) {
+
+                    try {
+
+                        const transfer =
+                            new DataTransfer();
+
+                        for (const face of faces) {
+
+                            transfer.items.add(
+                                new File(
+                                    [face.blob],
+                                    face.filename ||
+                                    `${face.name}.jpg`,
+                                    {
+                                        type:
+                                            face.type ||
+                                            face.blob.type ||
+                                            "image/jpeg"
+                                    }
+                                )
+                            );
+
+                            const nameField =
+                                document.createElement("input");
+
+                            nameField.type = "hidden";
+                            nameField.name = "guest_name";
+                            nameField.value = face.name;
+                            nameField.className = "guest-known-field";
+
+                            form.appendChild(nameField);
+                        }
+
+                        const fileField =
+                            document.createElement("input");
+
+                        fileField.type = "file";
+                        fileField.name = "guest_known";
+                        fileField.multiple = true;
+                        fileField.hidden = true;
+                        fileField.className = "guest-known-field";
+                        fileField.files = transfer.files;
+
+                        form.appendChild(fileField);
+
+                    } catch (error) {
+
+                        console.warn(
+                            "This browser can't attach guest faces; analyzing without them:",
+                            error
+                        );
+
+                        form
+                            .querySelectorAll(".guest-known-field")
+                            .forEach(function (element) {
+                                element.remove();
+                            });
+                    }
+                }
+
+
+                // form.submit() does not fire the submit event again.
+                form.submit();
             }
         );
     }
+
+
+    // Reset the Analyze button when the page is restored from the
+    // back/forward cache, otherwise it stays stuck on "Analyzing…".
+    window.addEventListener(
+        "pageshow",
+        function (event) {
+
+            if (event.persisted && analyzeBtn) {
+
+                analyzeBtn.textContent =
+                    "Analyze";
+
+                analyzeBtn.disabled =
+                    false;
+            }
+        }
+    );
 
 
     // ============================================================
@@ -1794,9 +1821,31 @@
             "load",
             function () {
 
+                // Remove the old registration whose scope was only
+                // /static/ and therefore never controlled any page.
+                navigator.serviceWorker
+                    .getRegistrations()
+                    .then(function (registrations) {
+
+                        registrations.forEach(
+                            function (registration) {
+
+                                if (
+                                    new URL(registration.scope)
+                                        .pathname
+                                        .startsWith("/static/")
+                                ) {
+                                    registration.unregister();
+                                }
+                            }
+                        );
+                    })
+                    .catch(function () {});
+
+
                 navigator.serviceWorker
                     .register(
-                        "/static/sw.js"
+                        "/sw.js"
                     )
                     .catch(
                         function (error) {

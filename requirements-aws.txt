@@ -1,13 +1,21 @@
-# Face recognition dependencies
-# dlib is installed separately in Dockerfile using dlib-bin.
+# Requires Python 3.11 (dlib-bin and numpy<2 have no wheels for 3.14).
+#
+# dlib, face_recognition and face_recognition_models are installed
+# separately (see Dockerfile / README) so pip never tries to build
+# dlib from source.
 
 Flask>=2.3
-opencv-python-headless>=4.8
+# opencv-python-headless 4.12+ requires numpy>=2.
+opencv-python-headless>=4.8,<4.12
 Pillow>=9.0
 numpy<2
 requests>=2.28
 Click>=8.0
 gunicorn
+
+# face_recognition_models imports pkg_resources, which was removed
+# in setuptools 81.
+setuptools<81
 
 # YouTube / online video URL support
 yt-dlp>=2025.8.11
